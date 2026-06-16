@@ -1,4 +1,5 @@
 import datetime
+import unicodedata
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -23,6 +24,24 @@ COLS = {
     "tipo_frete":     "NF: CIF/FOB",
 }
 C = COLS
+
+# ─── Empresa própria (não é cliente — deve ser excluída dos dados) ──────────
+def _normalizar_texto(s) -> str:
+    s = str(s).upper().strip()
+    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+    return s
+
+# Trecho distintivo do nome (sem sufixo societário) para casar variações como
+# "EIRELI", "LTDA", com ou sem acento, caixa alta/baixa, espaços extras, etc.
+EMPRESA_PROPRIA_CHAVE = "LGR INDUSTRIA DE COMERCIO DE PRODUTOS DE LIMPEZA"
+
+def remover_empresa_propria(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove pedidos cujo cliente é a própria empresa (transferência interna,
+    não é um cliente de fato e não deve entrar nos indicadores)."""
+    if C["cliente"] not in df.columns:
+        return df
+    mask = df[C["cliente"]].apply(_normalizar_texto).str.contains(EMPRESA_PROPRIA_CHAVE, na=False)
+    return df[~mask].copy()
 
 # ─── Conexão Supabase (histórico mensal) ─────────────────────────────────────
 SUPABASE_DISPONIVEL = True
@@ -175,6 +194,15 @@ if arquivo is not None:
     if faltando:
         st.error(f"⚠️ Colunas não encontradas no CSV:\n\n{faltando}\n\nVerifique se o arquivo está correto.")
         df = None
+    else:
+        qtd_antes = len(df)
+        df = remover_empresa_propria(df)
+        qtd_removida = qtd_antes - len(df)
+        if qtd_removida > 0:
+            st.caption(
+                f"ℹ️ {qtd_removida} registro(s) da própria empresa (LGR Indústria de Comércio "
+                f"de Produtos de Limpeza) foram excluídos da análise — não são clientes."
+            )
 
 st.markdown("## 🚚 Análise de Logística & Eficiência de Fretes")
 
@@ -518,6 +546,52 @@ with tab3:
             tbl_hist["Frete/Venda (%)"]  = tbl_hist["Frete/Venda (%)"].apply(formata_pct)
             tbl_hist["R$/Kg"]            = tbl_hist["R$/Kg"].apply(lambda v: f"R$ {v:.2f}")
             st.dataframe(tbl_hist, use_container_width=True, hide_index=True)
+
+            st.markdown("### 🏢 Total da Empresa por Mês")
+            st.caption("Soma de todos os estados em cada competência — visão consolidada da empresa.")
+            total_empresa = (
+                historico.groupby("mes", as_index=False)
+                .agg(
+                    venda_total=("venda_total", "sum"),
+                    frete_total=("frete_total", "sum"),
+                    peso_total=("peso_total", "sum"),
+                )
+                .sort_values("mes")
+            )
+            total_empresa["frete_sobre_venda"] = total_empresa.apply(
+                lambda r: r["frete_total"] / r["venda_total"] * 100 if r["venda_total"] > 0 else 0, axis=1
+            )
+            total_empresa["custo_por_kg"] = total_empresa.apply(
+                lambda r: r["frete_total"] / r["peso_total"] if r["peso_total"] > 0 else 0, axis=1
+            )
+
+            tbl_total_empresa = total_empresa.copy()
+            tbl_total_empresa.columns = [
+                "Mês", "Venda Total (R$)", "Frete Total (R$)",
+                "Peso Total (Kg)", "Frete/Venda (%)", "R$/Kg"
+            ]
+            tbl_total_empresa["Venda Total (R$)"] = tbl_total_empresa["Venda Total (R$)"].apply(formata_moeda)
+            tbl_total_empresa["Frete Total (R$)"] = tbl_total_empresa["Frete Total (R$)"].apply(formata_moeda)
+            tbl_total_empresa["Peso Total (Kg)"]  = tbl_total_empresa["Peso Total (Kg)"].apply(formata_kg)
+            tbl_total_empresa["Frete/Venda (%)"]  = tbl_total_empresa["Frete/Venda (%)"].apply(formata_pct)
+            tbl_total_empresa["R$/Kg"]            = tbl_total_empresa["R$/Kg"].apply(lambda v: f"R$ {v:.2f}")
+            st.dataframe(tbl_total_empresa, use_container_width=True, hide_index=True)
+
+            col_te1, col_te2 = st.columns(2)
+            with col_te1:
+                fig_total_frete = px.line(
+                    total_empresa, x="mes", y="frete_total", markers=True,
+                    title="Evolução do Frete Total da Empresa",
+                    labels={"mes": "Mês", "frete_total": "Total Frete (R$)"},
+                )
+                st.plotly_chart(fig_total_frete, use_container_width=True)
+            with col_te2:
+                fig_total_pct = px.line(
+                    total_empresa, x="mes", y="frete_sobre_venda", markers=True,
+                    title="Evolução do % Frete/Venda da Empresa",
+                    labels={"mes": "Mês", "frete_sobre_venda": "Frete/Venda (%)"},
+                )
+                st.plotly_chart(fig_total_pct, use_container_width=True)
 
             st.markdown("### 📈 Evolução dos Indicadores por Estado")
             default_estados = estados_disponiveis_hist[:5] if len(estados_disponiveis_hist) > 5 else estados_disponiveis_hist
