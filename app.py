@@ -1,13 +1,20 @@
 import datetime
+import os
 import unicodedata
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 
+# ─── Logo da Empresa ──────────────────────────────────────────────────────────
+# Coloque um arquivo "logo.png" na raiz do repositório (mesma pasta do app.py)
+# para usar a logo da empresa no ícone da aba e na barra lateral.
+LOGO_PATH = "logo.png"
+LOGO_DISPONIVEL = os.path.exists(LOGO_PATH)
+
 # ─── Configuração da Página ──────────────────────────────────────────────────
 st.set_page_config(
     page_title="Análise de Logística e Frete",
-    page_icon="🚚",
+    page_icon=LOGO_PATH if LOGO_DISPONIVEL else "🚚",
     layout="wide",
 )
 
@@ -166,7 +173,10 @@ MESES_PT = [
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/2590/2590584.png", width=64)
+    if LOGO_DISPONIVEL:
+        st.image(LOGO_PATH, width=160)
+    else:
+        st.image("https://cdn-icons-png.flaticon.com/512/2590/2590584.png", width=64)
     st.title("🚚 Frete Analytics")
     st.markdown("---")
     arquivo = st.file_uploader("📂 Upload do CSV mensal", type=["csv"])
