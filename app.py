@@ -29,8 +29,17 @@ COLS = {
     "peso":           "NF: Peso Bruto Kg",
     "vlr_frete":      "DT: R$ Total Cobrado",
     "tipo_frete":     "NF: CIF/FOB",
+    "data":           "NF: Data Emissão",
 }
 C = COLS
+
+# Colunas obrigatórias para o app funcionar (a coluna de data é opcional —
+# sem ela, tudo continua funcionando, só ficam indisponíveis o histórico
+# detalhado e a comparação por períodos).
+COLS_OBRIGATORIAS = [
+    "cliente", "transportadora", "uf_destino", "cidade_destino", "cidade_origem",
+    "vlr_pedido", "peso", "vlr_frete", "tipo_frete",
+]
 
 # ─── Empresa própria (não é cliente — deve ser excluída dos dados) ──────────
 def _normalizar_texto(s) -> str:
@@ -50,7 +59,7 @@ def remover_empresa_propria(df: pd.DataFrame) -> pd.DataFrame:
     mask = df[C["cliente"]].apply(_normalizar_texto).str.contains(EMPRESA_PROPRIA_CHAVE, na=False)
     return df[~mask].copy()
 
-# ─── Conexão Supabase (histórico mensal) ─────────────────────────────────────
+# ─── Conexão Supabase (histórico mensal e detalhado) ─────────────────────────
 SUPABASE_DISPONIVEL = True
 SUPABASE_URL = None
 SUPABASE_KEY = None
@@ -64,7 +73,8 @@ try:
 except Exception:
     SUPABASE_DISPONIVEL = False
 
-TABELA_HISTORICO = "fretes_mensais"
+TABELA_HISTORICO = "fretes_mensais"     # resumo agregado por mês/estado
+TABELA_PEDIDOS   = "pedidos_historico"  # pedidos individuais, linha a linha, com data
 
 
 @st.cache_resource
@@ -91,12 +101,72 @@ def salvar_historico_mensal(mes: str, agg_uf: pd.DataFrame):
 
 @st.cache_data(ttl=300)
 def carregar_historico_mensal() -> pd.DataFrame:
-    """Busca todo o histórico salvo no banco. Cache de 5 minutos."""
+    """Busca todo o histórico agregado salvo no banco. Cache de 5 minutos."""
     if not SUPABASE_DISPONIVEL:
         return pd.DataFrame()
     client = get_supabase_client()
     resp = client.table(TABELA_HISTORICO).select("*").order("mes").execute()
     return pd.DataFrame(resp.data)
+
+
+def salvar_pedidos_detalhados(mes: str, df: pd.DataFrame) -> tuple[int, int]:
+    """Salva os pedidos individuais (linha a linha, com data) da competência
+    informada no histórico detalhado, substituindo qualquer dado já salvo
+    para esse mês. Retorna (qtd_salva, qtd_ignorada_sem_data)."""
+    client = get_supabase_client()
+
+    sub = df[df["_dt"].notna()].copy() if "_dt" in df.columns else df.iloc[0:0]
+    ignorados = len(df) - len(sub)
+
+    # Remove qualquer dado já salvo para esse mês antes de inserir de novo,
+    # para evitar duplicar registros se o usuário salvar a mesma competência
+    # mais de uma vez.
+    client.table(TABELA_PEDIDOS).delete().eq("mes", mes).execute()
+
+    registros = []
+    for _, r in sub.iterrows():
+        registros.append({
+            "mes":            mes,
+            "data":           r["_dt"].strftime("%Y-%m-%d"),
+            "cliente":        str(r[C["cliente"]]),
+            "transportadora": str(r[C["transportadora"]]),
+            "uf_destino":     str(r[C["uf_destino"]]),
+            "cidade_destino": str(r[C["cidade_destino"]]),
+            "cidade_origem":  str(r[C["cidade_origem"]]),
+            "vlr_pedido":     float(r[C["vlr_pedido"]]),
+            "peso":           float(r[C["peso"]]),
+            "vlr_frete":      float(r[C["vlr_frete"]]),
+            "tipo_frete":     str(r[C["tipo_frete"]]),
+        })
+
+    TAMANHO_LOTE = 500
+    for i in range(0, len(registros), TAMANHO_LOTE):
+        lote = registros[i:i + TAMANHO_LOTE]
+        if lote:
+            client.table(TABELA_PEDIDOS).insert(lote).execute()
+
+    return len(registros), ignorados
+
+
+@st.cache_data(ttl=300)
+def carregar_pedidos_historico() -> pd.DataFrame:
+    """Busca todos os pedidos individuais salvos no histórico detalhado.
+    Cache de 5 minutos."""
+    if not SUPABASE_DISPONIVEL:
+        return pd.DataFrame()
+    client = get_supabase_client()
+    resp = client.table(TABELA_PEDIDOS).select("*").execute()
+    dfh = pd.DataFrame(resp.data)
+    if not dfh.empty:
+        dfh["_dt"] = pd.to_datetime(dfh["data"], errors="coerce")
+    return dfh
+
+
+# Mapa para reconstruir, a partir do histórico detalhado, um DataFrame com os
+# mesmos nomes de coluna do CSV original — assim a mesma função de exibição
+# (render_visao_estado) funciona tanto para o upload do mês atual quanto para
+# meses antigos recuperados do banco.
+RENAME_HIST_PARA_CSV = {alias: col for alias, col in COLS.items() if alias != "data"}
 
 
 # ─── Funções Auxiliares ──────────────────────────────────────────────────────
@@ -109,7 +179,7 @@ def formata_pct(valor):
 def formata_kg(valor):
     return f"{valor:,.1f} kg".replace(",", "X").replace(".", ",").replace("X", ".")
 
-def detalhe_pedidos(df_subset, titulo):
+def detalhe_pedidos(df_subset, titulo, key_prefix=""):
     """Exibe expander com os pedidos individuais que compõem um total."""
     with st.expander(f"🔎 Ver pedidos individuais — {titulo}"):
         cols_exibir = [
@@ -159,17 +229,148 @@ def carregar_dados(arquivo) -> pd.DataFrame:
                        "cliente", "transportadora", "tipo_frete"):
             df[col] = df[col].astype(str).str.strip()
 
+    # Coluna de data (opcional) — usada para o histórico detalhado e para a
+    # comparação por períodos. Aceita datas no formato brasileiro (dia/mês/ano).
+    if C["data"] in df.columns:
+        df["_dt"] = pd.to_datetime(df[C["data"]], dayfirst=True, errors="coerce")
+    else:
+        df["_dt"] = pd.NaT
+
     return df
 
 
 def validar_colunas(df: pd.DataFrame) -> list[str]:
-    return [c for c in COLS.values() if c not in df.columns]
+    return [COLS[a] for a in COLS_OBRIGATORIAS if COLS[a] not in df.columns]
 
 
 MESES_PT = [
     "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
     "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro",
 ]
+
+
+# ─── Exibição reutilizável: Visão por Estado ─────────────────────────────────
+def render_visao_estado(df_src: pd.DataFrame, key_prefix: str):
+    """Renderiza a tabela consolidada, gráficos e detalhamento por estado para
+    qualquer DataFrame no formato do CSV original (colunas em COLS). Usada
+    tanto para o arquivo recém-carregado quanto para meses antigos recuperados
+    do histórico detalhado, sem precisar de novo upload."""
+    agg_uf = (
+        df_src.groupby(C["uf_destino"], as_index=False)
+        .agg(
+            total_vendas=(C["vlr_pedido"], "sum"),
+            total_frete= (C["vlr_frete"],  "sum"),
+            total_peso=  (C["peso"],        "sum"),
+            qtd_pedidos= (C["vlr_pedido"], "count"),
+        )
+    )
+    agg_uf["rs_por_kg"] = agg_uf.apply(
+        lambda r: r["total_frete"] / r["total_peso"] if r["total_peso"] > 0 else 0, axis=1
+    )
+    agg_uf["pct_frete"] = agg_uf.apply(
+        lambda r: r["total_frete"] / r["total_vendas"] * 100 if r["total_vendas"] > 0 else 0, axis=1
+    )
+    agg_uf = agg_uf.sort_values("pct_frete", ascending=False).reset_index(drop=True)
+
+    st.markdown("### 📋 Tabela Consolidada por Estado")
+    display_uf = agg_uf.copy()
+    display_uf.columns = [
+        "Estado", "Total Vendas (R$)", "Total Frete (R$)",
+        "Peso Total (Kg)", "Qtd Pedidos", "R$/Kg (Frete/Peso)", "Frete/Venda (%)"
+    ]
+    for col_m in ["Total Vendas (R$)", "Total Frete (R$)"]:
+        display_uf[col_m] = display_uf[col_m].apply(formata_moeda)
+    display_uf["Peso Total (Kg)"]    = display_uf["Peso Total (Kg)"].apply(formata_kg)
+    display_uf["R$/Kg (Frete/Peso)"] = display_uf["R$/Kg (Frete/Peso)"].apply(lambda v: f"R$ {v:.2f}")
+    display_uf["Frete/Venda (%)"]    = display_uf["Frete/Venda (%)"].apply(formata_pct)
+    st.dataframe(display_uf, use_container_width=True, hide_index=True)
+
+    # Detalhamento por estado
+    ufs_disponiveis = sorted(agg_uf[C["uf_destino"]].tolist())
+    uf_detalhe = st.selectbox("Ver pedidos de qual Estado?", ufs_disponiveis, key=f"uf_detalhe_{key_prefix}")
+    detalhe_pedidos(df_src[df_src[C["uf_destino"]] == uf_detalhe], f"Estado {uf_detalhe}")
+
+    # Gráficos
+    col_g1, col_g2 = st.columns(2)
+    with col_g1:
+        fig_pct = px.bar(
+            agg_uf, x=C["uf_destino"], y="pct_frete",
+            title="% Frete sobre Venda por Estado",
+            labels={C["uf_destino"]: "Estado", "pct_frete": "Frete/Venda (%)"},
+            color="pct_frete", color_continuous_scale="RdYlGn_r", text_auto=".1f",
+        )
+        fig_pct.update_layout(showlegend=False, coloraxis_showscale=False)
+        st.plotly_chart(fig_pct, use_container_width=True, key=f"fig_pct_{key_prefix}")
+
+    with col_g2:
+        fig_abs = px.bar(
+            agg_uf.sort_values("total_frete", ascending=False),
+            x=C["uf_destino"], y="total_frete",
+            title="Total de Frete Absoluto por Estado (R$)",
+            labels={C["uf_destino"]: "Estado", "total_frete": "Total Frete (R$)"},
+            color="total_frete", color_continuous_scale="Blues", text_auto=".2s",
+        )
+        fig_abs.update_layout(showlegend=False, coloraxis_showscale=False)
+        st.plotly_chart(fig_abs, use_container_width=True, key=f"fig_abs_{key_prefix}")
+
+    # Clientes e Transportadoras por UF
+    st.markdown("### 🔍 Clientes e Transportadoras por Estado")
+    uf_selecionada = st.selectbox("Selecione um Estado:", ufs_disponiveis, key=f"uf_{key_prefix}")
+    df_uf = df_src[df_src[C["uf_destino"]] == uf_selecionada]
+
+    col_cli, col_transp = st.columns(2)
+    with col_cli:
+        st.markdown(f"**👤 Clientes em {uf_selecionada}**")
+        clientes_uf = (
+            df_uf.groupby(C["cliente"], as_index=False)
+            .agg(
+                total_vendas=(C["vlr_pedido"], "sum"),
+                total_frete= (C["vlr_frete"],  "sum"),
+                qtd_pedidos= (C["vlr_pedido"], "count"),
+            )
+            .sort_values("total_frete", ascending=False)
+        )
+        clientes_uf["pct_frete"] = clientes_uf.apply(
+            lambda r: r["total_frete"] / r["total_vendas"] * 100 if r["total_vendas"] > 0 else 0, axis=1
+        )
+        tbl_cli_uf = clientes_uf.copy()
+        tbl_cli_uf.columns = ["Cliente", "Total Vendas (R$)", "Total Frete (R$)", "Qtd Pedidos", "Frete/Venda (%)"]
+        tbl_cli_uf["Total Vendas (R$)"] = tbl_cli_uf["Total Vendas (R$)"].apply(formata_moeda)
+        tbl_cli_uf["Total Frete (R$)"]  = tbl_cli_uf["Total Frete (R$)"].apply(formata_moeda)
+        tbl_cli_uf["Frete/Venda (%)"]   = tbl_cli_uf["Frete/Venda (%)"].apply(formata_pct)
+        st.dataframe(tbl_cli_uf, use_container_width=True, hide_index=True)
+
+        clientes_lista = clientes_uf[C["cliente"]].tolist()
+        cli_sel = st.selectbox("Ver pedidos do cliente:", clientes_lista, key=f"cli_sel_{key_prefix}")
+        detalhe_pedidos(df_uf[df_uf[C["cliente"]] == cli_sel], f"{cli_sel} em {uf_selecionada}")
+
+    with col_transp:
+        st.markdown(f"**🚛 Transportadoras em {uf_selecionada}**")
+        transp_uf = (
+            df_uf.groupby(C["transportadora"], as_index=False)
+            .agg(
+                total_frete= (C["vlr_frete"], "sum"),
+                total_peso=  (C["peso"],      "sum"),
+                qtd_pedidos= (C["vlr_frete"], "count"),
+            )
+            .sort_values("total_frete", ascending=False)
+        )
+        transp_uf["rs_por_kg"] = transp_uf.apply(
+            lambda r: r["total_frete"] / r["total_peso"] if r["total_peso"] > 0 else 0, axis=1
+        )
+        tbl_transp_uf = transp_uf.copy()
+        tbl_transp_uf.columns = ["Transportadora", "Total Frete (R$)", "Peso Total (Kg)", "Qtd Pedidos", "R$/Kg"]
+        tbl_transp_uf["Total Frete (R$)"] = tbl_transp_uf["Total Frete (R$)"].apply(formata_moeda)
+        tbl_transp_uf["Peso Total (Kg)"]  = tbl_transp_uf["Peso Total (Kg)"].apply(formata_kg)
+        tbl_transp_uf["R$/Kg"]            = tbl_transp_uf["R$/Kg"].apply(lambda v: f"R$ {v:.2f}")
+        st.dataframe(tbl_transp_uf, use_container_width=True, hide_index=True)
+
+        transp_lista = transp_uf[C["transportadora"]].tolist()
+        transp_sel = st.selectbox("Ver pedidos da transportadora:", transp_lista, key=f"transp_sel_{key_prefix}")
+        detalhe_pedidos(df_uf[df_uf[C["transportadora"]] == transp_sel], f"{transp_sel} em {uf_selecionada}")
+
+    return agg_uf
+
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -179,7 +380,34 @@ with st.sidebar:
         st.image("https://cdn-icons-png.flaticon.com/512/2590/2590584.png", width=64)
     st.title("🚚 Frete Analytics")
     st.markdown("---")
-    arquivo = st.file_uploader("📂 Upload do CSV mensal", type=["csv"])
+    st.caption("📤 Use a aba **Upload Mensal** para enviar o CSV todo mês.")
+    st.markdown("---")
+    if SUPABASE_DISPONIVEL:
+        st.success("🟢 Histórico conectado")
+    else:
+        st.warning("🟡 Histórico desconectado\n\nConfigure SUPABASE_URL e SUPABASE_KEY em Secrets para habilitar.")
+
+st.markdown("## 🚚 Análise de Logística & Eficiência de Fretes")
+
+tab_upload, tab1, tab2, tab_hist, tab3 = st.tabs([
+    "📤 Upload Mensal",
+    "📍 Visão por Estado",
+    "🔬 Análise de Deficiência",
+    "🗄️ Meses Anteriores",
+    "📊 Comparação Mensal",
+])
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ABA 0 — UPLOAD MENSAL
+# ═══════════════════════════════════════════════════════════════════════════════
+df = None
+faltando = []
+mes_competencia = None
+arquivo = None
+
+with tab_upload:
+    st.markdown("### 📂 Envie o CSV do mês")
+    arquivo = st.file_uploader("Upload do CSV mensal", type=["csv"])
 
     st.markdown("### 📅 Competência do arquivo")
     hoje = datetime.date.today()
@@ -188,199 +416,114 @@ with st.sidebar:
     ano_sel = col_ano.number_input("Ano", min_value=2020, max_value=2100, value=hoje.year, step=1)
     mes_competencia = f"{ano_sel}-{MESES_PT.index(mes_nome) + 1:02d}"
 
-    st.markdown("---")
-    if SUPABASE_DISPONIVEL:
-        st.success("🟢 Histórico conectado")
-    else:
-        st.warning("🟡 Histórico desconectado\n\nConfigure SUPABASE_URL e SUPABASE_KEY em Secrets para habilitar.")
-    st.caption("Envie o arquivo CSV exportado do seu sistema todo mês. O app processa tudo automaticamente.")
+    if arquivo is not None:
+        df = carregar_dados(arquivo)
+        faltando = validar_colunas(df)
+        if faltando:
+            st.error(f"⚠️ Colunas não encontradas no CSV:\n\n{faltando}\n\nVerifique se o arquivo está correto.")
+            df = None
+        else:
+            qtd_antes = len(df)
+            df = remover_empresa_propria(df)
+            qtd_removida = qtd_antes - len(df)
+            if qtd_removida > 0:
+                st.caption(
+                    f"ℹ️ {qtd_removida} registro(s) da própria empresa (LGR Indústria de Comércio "
+                    f"de Produtos de Limpeza) foram excluídos da análise — não são clientes."
+                )
+            if C["data"] not in df.columns or df["_dt"].notna().sum() == 0:
+                st.warning(
+                    "🟡 Não foi encontrada a coluna de data (\"NF: Data Emissão\") com datas válidas "
+                    "neste CSV. O histórico detalhado e a comparação por períodos não estarão "
+                    "disponíveis para esta competência."
+                )
 
-# ─── Carrega e valida (se houver upload) ─────────────────────────────────────
-df = None
-faltando = []
-if arquivo is not None:
-    df = carregar_dados(arquivo)
-    faltando = validar_colunas(df)
-    if faltando:
-        st.error(f"⚠️ Colunas não encontradas no CSV:\n\n{faltando}\n\nVerifique se o arquivo está correto.")
-        df = None
-    else:
-        qtd_antes = len(df)
-        df = remover_empresa_propria(df)
-        qtd_removida = qtd_antes - len(df)
-        if qtd_removida > 0:
-            st.caption(
-                f"ℹ️ {qtd_removida} registro(s) da própria empresa (LGR Indústria de Comércio "
-                f"de Produtos de Limpeza) foram excluídos da análise — não são clientes."
+    if df is not None:
+        st.markdown("---")
+        total_pedidos = df[C["vlr_pedido"]].sum()
+        total_frete   = df[C["vlr_frete"]].sum()
+        total_peso    = df[C["peso"]].sum()
+        pct_global    = (total_frete / total_pedidos * 100) if total_pedidos > 0 else 0
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("💰 Total de Vendas", formata_moeda(total_pedidos))
+        col2.metric("🚛 Total de Fretes", formata_moeda(total_frete))
+        col3.metric("⚖️ Peso Total",      formata_kg(total_peso))
+        col4.metric("📊 Frete / Venda",   formata_pct(pct_global))
+
+        st.markdown("---")
+        st.markdown("### 💾 Salvar no Histórico")
+        st.caption(
+            f"Salva os dados da competência **{mes_competencia}** no banco de histórico. "
+            f"Se já existir um registro para este mês, ele será substituído."
+        )
+
+        agg_uf_save = (
+            df.groupby(C["uf_destino"], as_index=False)
+            .agg(
+                total_vendas=(C["vlr_pedido"], "sum"),
+                total_frete= (C["vlr_frete"],  "sum"),
+                total_peso=  (C["peso"],        "sum"),
             )
+        )
+        agg_uf_save["rs_por_kg"] = agg_uf_save.apply(
+            lambda r: r["total_frete"] / r["total_peso"] if r["total_peso"] > 0 else 0, axis=1
+        )
+        agg_uf_save["pct_frete"] = agg_uf_save.apply(
+            lambda r: r["total_frete"] / r["total_vendas"] * 100 if r["total_vendas"] > 0 else 0, axis=1
+        )
 
-st.markdown("## 🚚 Análise de Logística & Eficiência de Fretes")
+        col_save1, col_save2 = st.columns(2)
+        with col_save1:
+            st.caption("**Resumo agregado** — alimenta a evolução por estado na aba Comparação Mensal.")
+            if st.button("💾 Salvar resumo agregado", type="primary", disabled=not SUPABASE_DISPONIVEL):
+                try:
+                    salvar_historico_mensal(mes_competencia, agg_uf_save)
+                    carregar_historico_mensal.clear()
+                    st.success(f"✅ Resumo de {mes_competencia} salvo no histórico!")
+                except Exception as e:
+                    st.error(f"Erro ao salvar resumo: {e}")
 
-if df is not None:
-    total_pedidos = df[C["vlr_pedido"]].sum()
-    total_frete   = df[C["vlr_frete"]].sum()
-    total_peso    = df[C["peso"]].sum()
-    pct_global    = (total_frete / total_pedidos * 100) if total_pedidos > 0 else 0
+        with col_save2:
+            tem_data = C["data"] in df.columns and df["_dt"].notna().sum() > 0
+            st.caption("**Pedidos detalhados (com data)** — alimenta a aba Meses Anteriores e a Comparação por Períodos.")
+            if st.button(
+                "💾 Salvar dados detalhados",
+                type="primary",
+                disabled=not SUPABASE_DISPONIVEL or not tem_data,
+            ):
+                try:
+                    qtd_salva, qtd_ignorada = salvar_pedidos_detalhados(mes_competencia, df)
+                    carregar_pedidos_historico.clear()
+                    msg = f"✅ {qtd_salva} pedido(s) de {mes_competencia} salvos no histórico detalhado!"
+                    if qtd_ignorada > 0:
+                        msg += f" ({qtd_ignorada} ignorado(s) por falta de data válida.)"
+                    st.success(msg)
+                except Exception as e:
+                    st.error(f"Erro ao salvar dados detalhados: {e}")
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("💰 Total de Vendas", formata_moeda(total_pedidos))
-    col2.metric("🚛 Total de Fretes", formata_moeda(total_frete))
-    col3.metric("⚖️ Peso Total",      formata_kg(total_peso))
-    col4.metric("📊 Frete / Venda",   formata_pct(pct_global))
+        if not SUPABASE_DISPONIVEL:
+            st.caption("⚠️ Conecte o Supabase (Secrets) para habilitar o salvamento.")
+    else:
+        st.info("📂 Envie um CSV acima para começar a análise.")
 
 st.markdown("---")
-
-tab1, tab2, tab3 = st.tabs([
-    "📍 Visão por Estado",
-    "🔬 Análise de Deficiência",
-    "📊 Comparação Mensal",
-])
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ABA 1 — VISÃO POR ESTADO
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab1:
     if df is None:
-        st.info("📂 Faça upload do CSV mensal na barra lateral para ver esta análise.")
+        st.info("📂 Faça upload do CSV mensal na aba **Upload Mensal** para ver esta análise.")
     else:
-        agg_uf = (
-            df.groupby(C["uf_destino"], as_index=False)
-            .agg(
-                total_vendas=(C["vlr_pedido"], "sum"),
-                total_frete= (C["vlr_frete"],  "sum"),
-                total_peso=  (C["peso"],        "sum"),
-                qtd_pedidos= (C["vlr_pedido"], "count"),
-            )
-        )
-        # R$/Kg = Total Frete / Peso Total
-        agg_uf["rs_por_kg"] = agg_uf.apply(
-            lambda r: r["total_frete"] / r["total_peso"] if r["total_peso"] > 0 else 0, axis=1
-        )
-        agg_uf["pct_frete"] = agg_uf.apply(
-            lambda r: r["total_frete"] / r["total_vendas"] * 100 if r["total_vendas"] > 0 else 0, axis=1
-        )
-        agg_uf = agg_uf.sort_values("pct_frete", ascending=False).reset_index(drop=True)
-
-        st.markdown("### 📋 Tabela Consolidada por Estado")
-        display_uf = agg_uf.copy()
-        display_uf.columns = [
-            "Estado", "Total Vendas (R$)", "Total Frete (R$)",
-            "Peso Total (Kg)", "Qtd Pedidos", "R$/Kg (Frete/Peso)", "Frete/Venda (%)"
-        ]
-        for col_m in ["Total Vendas (R$)", "Total Frete (R$)"]:
-            display_uf[col_m] = display_uf[col_m].apply(formata_moeda)
-        display_uf["Peso Total (Kg)"]    = display_uf["Peso Total (Kg)"].apply(formata_kg)
-        display_uf["R$/Kg (Frete/Peso)"] = display_uf["R$/Kg (Frete/Peso)"].apply(lambda v: f"R$ {v:.2f}")
-        display_uf["Frete/Venda (%)"]    = display_uf["Frete/Venda (%)"].apply(formata_pct)
-        st.dataframe(display_uf, use_container_width=True, hide_index=True)
-
-        # Detalhamento por estado
-        ufs_disponiveis = sorted(agg_uf[C["uf_destino"]].tolist())
-        uf_detalhe_p1 = st.selectbox("Ver pedidos de qual Estado?", ufs_disponiveis, key="uf_detalhe_p1")
-        detalhe_pedidos(df[df[C["uf_destino"]] == uf_detalhe_p1], f"Estado {uf_detalhe_p1}")
-
-        # Botão para salvar no histórico
-        st.markdown("### 💾 Salvar no Histórico Mensal")
-        col_save1, col_save2 = st.columns([3, 1])
-        col_save1.caption(
-            f"Salva os totais agregados por estado para a competência **{mes_competencia}** "
-            f"no banco de histórico. Se já existir um registro para este mês/estado, ele será substituído."
-        )
-        if col_save2.button("💾 Salvar agora", type="primary", disabled=not SUPABASE_DISPONIVEL):
-            try:
-                salvar_historico_mensal(mes_competencia, agg_uf)
-                carregar_historico_mensal.clear()
-                st.success(f"✅ Dados de {mes_competencia} salvos no histórico!")
-            except Exception as e:
-                st.error(f"Erro ao salvar no histórico: {e}")
-        if not SUPABASE_DISPONIVEL:
-            st.caption("⚠️ Conecte o Supabase (Secrets) para habilitar o salvamento.")
-
-        # Gráficos
-        col_g1, col_g2 = st.columns(2)
-        with col_g1:
-            fig_pct = px.bar(
-                agg_uf, x=C["uf_destino"], y="pct_frete",
-                title="% Frete sobre Venda por Estado",
-                labels={C["uf_destino"]: "Estado", "pct_frete": "Frete/Venda (%)"},
-                color="pct_frete", color_continuous_scale="RdYlGn_r", text_auto=".1f",
-            )
-            fig_pct.update_layout(showlegend=False, coloraxis_showscale=False)
-            st.plotly_chart(fig_pct, use_container_width=True)
-
-        with col_g2:
-            fig_abs = px.bar(
-                agg_uf.sort_values("total_frete", ascending=False),
-                x=C["uf_destino"], y="total_frete",
-                title="Total de Frete Absoluto por Estado (R$)",
-                labels={C["uf_destino"]: "Estado", "total_frete": "Total Frete (R$)"},
-                color="total_frete", color_continuous_scale="Blues", text_auto=".2s",
-            )
-            fig_abs.update_layout(showlegend=False, coloraxis_showscale=False)
-            st.plotly_chart(fig_abs, use_container_width=True)
-
-        # Clientes e Transportadoras por UF
-        st.markdown("### 🔍 Clientes e Transportadoras por Estado")
-        uf_selecionada_p1 = st.selectbox("Selecione um Estado:", ufs_disponiveis, key="uf_p1")
-        df_uf_p1 = df[df[C["uf_destino"]] == uf_selecionada_p1]
-
-        col_cli, col_transp = st.columns(2)
-        with col_cli:
-            st.markdown(f"**👤 Clientes em {uf_selecionada_p1}**")
-            clientes_uf = (
-                df_uf_p1.groupby(C["cliente"], as_index=False)
-                .agg(
-                    total_vendas=(C["vlr_pedido"], "sum"),
-                    total_frete= (C["vlr_frete"],  "sum"),
-                    qtd_pedidos= (C["vlr_pedido"], "count"),
-                )
-                .sort_values("total_frete", ascending=False)
-            )
-            clientes_uf["pct_frete"] = clientes_uf.apply(
-                lambda r: r["total_frete"] / r["total_vendas"] * 100 if r["total_vendas"] > 0 else 0, axis=1
-            )
-            tbl_cli_uf = clientes_uf.copy()
-            tbl_cli_uf.columns = ["Cliente", "Total Vendas (R$)", "Total Frete (R$)", "Qtd Pedidos", "Frete/Venda (%)"]
-            tbl_cli_uf["Total Vendas (R$)"] = tbl_cli_uf["Total Vendas (R$)"].apply(formata_moeda)
-            tbl_cli_uf["Total Frete (R$)"]  = tbl_cli_uf["Total Frete (R$)"].apply(formata_moeda)
-            tbl_cli_uf["Frete/Venda (%)"]   = tbl_cli_uf["Frete/Venda (%)"].apply(formata_pct)
-            st.dataframe(tbl_cli_uf, use_container_width=True, hide_index=True)
-
-            clientes_lista = clientes_uf[C["cliente"]].tolist()
-            cli_sel = st.selectbox("Ver pedidos do cliente:", clientes_lista, key="cli_sel_p1")
-            detalhe_pedidos(df_uf_p1[df_uf_p1[C["cliente"]] == cli_sel], f"{cli_sel} em {uf_selecionada_p1}")
-
-        with col_transp:
-            st.markdown(f"**🚛 Transportadoras em {uf_selecionada_p1}**")
-            transp_uf = (
-                df_uf_p1.groupby(C["transportadora"], as_index=False)
-                .agg(
-                    total_frete= (C["vlr_frete"], "sum"),
-                    total_peso=  (C["peso"],      "sum"),
-                    qtd_pedidos= (C["vlr_frete"], "count"),
-                )
-                .sort_values("total_frete", ascending=False)
-            )
-            transp_uf["rs_por_kg"] = transp_uf.apply(
-                lambda r: r["total_frete"] / r["total_peso"] if r["total_peso"] > 0 else 0, axis=1
-            )
-            tbl_transp_uf = transp_uf.copy()
-            tbl_transp_uf.columns = ["Transportadora", "Total Frete (R$)", "Peso Total (Kg)", "Qtd Pedidos", "R$/Kg"]
-            tbl_transp_uf["Total Frete (R$)"] = tbl_transp_uf["Total Frete (R$)"].apply(formata_moeda)
-            tbl_transp_uf["Peso Total (Kg)"]  = tbl_transp_uf["Peso Total (Kg)"].apply(formata_kg)
-            tbl_transp_uf["R$/Kg"]            = tbl_transp_uf["R$/Kg"].apply(lambda v: f"R$ {v:.2f}")
-            st.dataframe(tbl_transp_uf, use_container_width=True, hide_index=True)
-
-            transp_lista = transp_uf[C["transportadora"]].tolist()
-            transp_sel = st.selectbox("Ver pedidos da transportadora:", transp_lista, key="transp_sel_p1")
-            detalhe_pedidos(df_uf_p1[df_uf_p1[C["transportadora"]] == transp_sel], f"{transp_sel} em {uf_selecionada_p1}")
+        render_visao_estado(df, "p1")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ABA 2 — ANÁLISE DE DEFICIÊNCIA
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab2:
     if df is None:
-        st.info("📂 Faça upload do CSV mensal na barra lateral para ver esta análise.")
+        st.info("📂 Faça upload do CSV mensal na aba **Upload Mensal** para ver esta análise.")
     else:
         ufs_disponiveis_p2 = sorted(df[C["uf_destino"]].unique().tolist())
         uf_deep = st.selectbox("Selecione o Estado para investigar:", ufs_disponiveis_p2, index=0, key="uf_deep")
@@ -520,6 +663,51 @@ with tab2:
                         st.plotly_chart(fig_scatter, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ABA "MESES ANTERIORES" — vê meses já salvos sem precisar fazer upload de novo
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_hist:
+    st.markdown("## 🗄️ Meses Anteriores")
+    st.caption(
+        "Veja a análise completa de qualquer mês já salvo no histórico detalhado, "
+        "sem precisar enviar o CSV novamente."
+    )
+
+    if not SUPABASE_DISPONIVEL:
+        st.warning(
+            "🟡 Conexão com o banco de histórico (Supabase) não configurada.\n\n"
+            "Configure `SUPABASE_URL` e `SUPABASE_KEY` em **Settings → Secrets** "
+            "no Streamlit Cloud para habilitar esta aba."
+        )
+    else:
+        pedidos_hist_all = carregar_pedidos_historico()
+        if pedidos_hist_all.empty:
+            st.info(
+                "Nenhum dado detalhado salvo ainda. Vá para a aba **📤 Upload Mensal**, "
+                "envie um CSV e clique em **Salvar dados detalhados** para começar a "
+                "guardar o histórico mês a mês."
+            )
+        else:
+            meses_hist = sorted(pedidos_hist_all["mes"].unique().tolist(), reverse=True)
+            mes_hist_sel = st.selectbox("Selecione o mês para visualizar:", meses_hist, key="mes_hist_sel")
+
+            df_mes_hist = pedidos_hist_all[pedidos_hist_all["mes"] == mes_hist_sel].copy()
+            df_mes_hist = df_mes_hist.rename(columns=RENAME_HIST_PARA_CSV)
+
+            total_v = df_mes_hist[C["vlr_pedido"]].sum()
+            total_f = df_mes_hist[C["vlr_frete"]].sum()
+            total_p = df_mes_hist[C["peso"]].sum()
+            pct_g   = (total_f / total_v * 100) if total_v > 0 else 0
+
+            colh1, colh2, colh3, colh4 = st.columns(4)
+            colh1.metric("💰 Total de Vendas", formata_moeda(total_v))
+            colh2.metric("🚛 Total de Fretes", formata_moeda(total_f))
+            colh3.metric("⚖️ Peso Total",      formata_kg(total_p))
+            colh4.metric("📊 Frete / Venda",   formata_pct(pct_g))
+
+            st.markdown("---")
+            render_visao_estado(df_mes_hist, f"hist_{mes_hist_sel}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ABA 3 — COMPARAÇÃO MENSAL (histórico no banco)
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab3:
@@ -537,7 +725,7 @@ with tab3:
         if historico.empty:
             st.info(
                 "Nenhum histórico salvo ainda. Faça upload de um CSV mensal na aba "
-                "**Visão por Estado** e clique em **Salvar agora** para começar a registrar."
+                "**Upload Mensal** e clique em **Salvar resumo agregado** para começar a registrar."
             )
         else:
             historico = historico.sort_values(["mes", "estado"]).reset_index(drop=True)
@@ -634,49 +822,172 @@ with tab3:
                 )
                 st.plotly_chart(fig_eve_kg, use_container_width=True)
 
-            st.markdown("### 🔄 Comparar Dois Meses")
-            if len(meses_disponiveis) < 2:
-                st.info("É preciso ter ao menos 2 meses salvos no histórico para fazer esta comparação.")
+        # ── Comparar Períodos (datas customizadas, quantos quiser) ──────────
+        st.markdown("### 🔄 Comparar Períodos")
+        st.caption(
+            "Compare intervalos de datas específicos — por exemplo, a mesma semana em "
+            "anos diferentes (13/07 a 18/07 de 2022 x 13/07 a 18/07 de 2023). Use quantos "
+            "períodos quiser. Os dados vêm do histórico detalhado salvo na aba "
+            "**📤 Upload Mensal** (botão **Salvar dados detalhados**)."
+        )
+
+        pedidos_hist = carregar_pedidos_historico()
+
+        if pedidos_hist.empty:
+            st.info(
+                "Nenhum dado detalhado salvo ainda. Vá para a aba **📤 Upload Mensal**, "
+                "envie um CSV e clique em **Salvar dados detalhados** para habilitar "
+                "a comparação por períodos."
+            )
+        else:
+            dt_min = pedidos_hist["_dt"].min().date()
+            dt_max = pedidos_hist["_dt"].max().date()
+
+            if "periodos_comp" not in st.session_state:
+                fim_default = dt_max
+                ini_default = max(dt_min, fim_default - datetime.timedelta(days=6))
+                st.session_state.periodos_comp = [
+                    {"id": 1, "label": "Período 1", "inicio": ini_default, "fim": fim_default},
+                    {"id": 2, "label": "Período 2", "inicio": ini_default, "fim": fim_default},
+                ]
+                st.session_state.next_periodo_id = 3
+
+            st.markdown("#### Períodos selecionados")
+            periodos = st.session_state.periodos_comp
+
+            for p in periodos:
+                c_label, c_ini, c_fim, c_rm = st.columns([2, 2, 2, 1])
+                p["label"]  = c_label.text_input("Nome", value=p["label"], key=f"periodo_label_{p['id']}")
+                p["inicio"] = c_ini.date_input("Início", value=p["inicio"], min_value=dt_min, max_value=dt_max, key=f"periodo_ini_{p['id']}")
+                p["fim"]    = c_fim.date_input("Fim", value=p["fim"], min_value=dt_min, max_value=dt_max, key=f"periodo_fim_{p['id']}")
+                c_rm.markdown("&nbsp;")
+                if c_rm.button("🗑️", key=f"periodo_rm_{p['id']}") and len(periodos) > 1:
+                    st.session_state.periodos_comp = [x for x in periodos if x["id"] != p["id"]]
+                    st.rerun()
+
+            if st.button("➕ Adicionar período"):
+                novo_id = st.session_state.next_periodo_id
+                st.session_state.next_periodo_id += 1
+                ultimo = st.session_state.periodos_comp[-1]
+                st.session_state.periodos_comp.append({
+                    "id": novo_id, "label": f"Período {len(st.session_state.periodos_comp) + 1}",
+                    "inicio": ultimo["inicio"], "fim": ultimo["fim"],
+                })
+                st.rerun()
+
+            linhas = []
+            detalhes_por_periodo = {}
+            for p in st.session_state.periodos_comp:
+                ini, fim = p["inicio"], p["fim"]
+                if ini > fim:
+                    st.warning(f"⚠️ Período '{p['label']}': a data de início é depois da data de fim — ignorado.")
+                    continue
+                sub = pedidos_hist[(pedidos_hist["_dt"].dt.date >= ini) & (pedidos_hist["_dt"].dt.date <= fim)]
+                venda = sub["vlr_pedido"].sum()
+                frete = sub["vlr_frete"].sum()
+                peso  = sub["peso"].sum()
+                linhas.append({
+                    "Período":         p["label"],
+                    "Intervalo":       f"{ini.strftime('%d/%m/%Y')} a {fim.strftime('%d/%m/%Y')}",
+                    "Venda Total":     venda,
+                    "Frete Total":     frete,
+                    "Peso Total":      peso,
+                    "Frete/Venda (%)": (frete / venda * 100) if venda > 0 else 0,
+                    "R$/Kg":           (frete / peso) if peso > 0 else 0,
+                    "Qtd Pedidos":     len(sub),
+                })
+                detalhes_por_periodo[p["label"]] = sub
+
+            if not linhas:
+                st.info("Configure ao menos um período válido para ver a comparação.")
             else:
-                col_ma, col_mb = st.columns(2)
-                mes_a = col_ma.selectbox("Mês A (base)", meses_disponiveis, index=len(meses_disponiveis) - 2, key="mes_a")
-                mes_b = col_mb.selectbox("Mês B (comparação)", meses_disponiveis, index=len(meses_disponiveis) - 1, key="mes_b")
+                comp_periodos = pd.DataFrame(linhas)
+                primeiro = comp_periodos.iloc[0]
+                comp_periodos["Δ Frete vs 1º (%)"] = comp_periodos["Frete Total"].apply(
+                    lambda v: (v - primeiro["Frete Total"]) / primeiro["Frete Total"] * 100
+                    if primeiro["Frete Total"] > 0 else 0
+                )
 
-                df_a = historico[historico["mes"] == mes_a].set_index("estado")
-                df_b = historico[historico["mes"] == mes_b].set_index("estado")
-                estados_comuns = sorted(set(df_a.index) & set(df_b.index))
+                tbl_periodos = comp_periodos.copy()
+                tbl_periodos["Venda Total"]       = tbl_periodos["Venda Total"].apply(formata_moeda)
+                tbl_periodos["Frete Total"]       = tbl_periodos["Frete Total"].apply(formata_moeda)
+                tbl_periodos["Peso Total"]        = tbl_periodos["Peso Total"].apply(formata_kg)
+                tbl_periodos["Frete/Venda (%)"]   = tbl_periodos["Frete/Venda (%)"].apply(formata_pct)
+                tbl_periodos["R$/Kg"]             = tbl_periodos["R$/Kg"].apply(lambda v: f"R$ {v:.2f}")
+                tbl_periodos["Δ Frete vs 1º (%)"] = tbl_periodos["Δ Frete vs 1º (%)"].apply(lambda v: f"{v:+.1f}%")
+                st.dataframe(tbl_periodos, use_container_width=True, hide_index=True)
 
-                if not estados_comuns:
-                    st.info("Não há estados em comum entre os meses selecionados.")
-                else:
-                    comp = pd.DataFrame({"Estado": estados_comuns})
-                    comp["Frete A"]  = [df_a.loc[e, "frete_total"] for e in estados_comuns]
-                    comp["Frete B"]  = [df_b.loc[e, "frete_total"] for e in estados_comuns]
-                    comp["Δ Frete (%)"] = comp.apply(
-                        lambda r: (r["Frete B"] - r["Frete A"]) / r["Frete A"] * 100 if r["Frete A"] > 0 else 0, axis=1
+                col_p1, col_p2 = st.columns(2)
+                with col_p1:
+                    comp_melt = comp_periodos.melt(
+                        id_vars=["Período"], value_vars=["Venda Total", "Frete Total"],
+                        var_name="Indicador", value_name="Valor",
                     )
-                    comp["Frete/Venda A (%)"] = [df_a.loc[e, "frete_sobre_venda"] for e in estados_comuns]
-                    comp["Frete/Venda B (%)"] = [df_b.loc[e, "frete_sobre_venda"] for e in estados_comuns]
-                    comp["Δ Frete/Venda (p.p.)"] = comp["Frete/Venda B (%)"] - comp["Frete/Venda A (%)"]
-                    comp["R$/Kg A"] = [df_a.loc[e, "custo_por_kg"] for e in estados_comuns]
-                    comp["R$/Kg B"] = [df_b.loc[e, "custo_por_kg"] for e in estados_comuns]
-                    comp["Δ R$/Kg (%)"] = comp.apply(
-                        lambda r: (r["R$/Kg B"] - r["R$/Kg A"]) / r["R$/Kg A"] * 100 if r["R$/Kg A"] > 0 else 0, axis=1
+                    fig_periodos_valores = px.bar(
+                        comp_melt, x="Período", y="Valor", color="Indicador", barmode="group",
+                        title="Venda Total x Frete Total por Período",
+                        labels={"Valor": "R$"},
                     )
+                    st.plotly_chart(fig_periodos_valores, use_container_width=True)
 
-                    comp_display = comp.copy()
-                    comp_display["Frete A"]  = comp_display["Frete A"].apply(formata_moeda)
-                    comp_display["Frete B"]  = comp_display["Frete B"].apply(formata_moeda)
-                    comp_display["Δ Frete (%)"] = comp_display["Δ Frete (%)"].apply(lambda v: f"{v:+.1f}%")
-                    comp_display["Frete/Venda A (%)"] = comp_display["Frete/Venda A (%)"].apply(formata_pct)
-                    comp_display["Frete/Venda B (%)"] = comp_display["Frete/Venda B (%)"].apply(formata_pct)
-                    comp_display["Δ Frete/Venda (p.p.)"] = comp_display["Δ Frete/Venda (p.p.)"].apply(lambda v: f"{v:+.2f} p.p.")
-                    comp_display["R$/Kg A"] = comp_display["R$/Kg A"].apply(lambda v: f"R$ {v:.2f}")
-                    comp_display["R$/Kg B"] = comp_display["R$/Kg B"].apply(lambda v: f"R$ {v:.2f}")
-                    comp_display["Δ R$/Kg (%)"] = comp_display["Δ R$/Kg (%)"].apply(lambda v: f"{v:+.1f}%")
+                with col_p2:
+                    fig_periodos_pct = px.bar(
+                        comp_periodos, x="Período", y="Frete/Venda (%)",
+                        title="% Frete/Venda por Período",
+                        color="Frete/Venda (%)", color_continuous_scale="RdYlGn_r", text_auto=".1f",
+                    )
+                    fig_periodos_pct.update_layout(coloraxis_showscale=False)
+                    st.plotly_chart(fig_periodos_pct, use_container_width=True)
 
-                    st.caption(f"Comparando **{mes_a}** (A) com **{mes_b}** (B)")
-                    st.dataframe(comp_display, use_container_width=True, hide_index=True)
+                fig_periodos_kg = px.bar(
+                    comp_periodos, x="Período", y="R$/Kg",
+                    title="R$/Kg por Período",
+                    color="R$/Kg", color_continuous_scale="Blues", text_auto=".2f",
+                )
+                fig_periodos_kg.update_layout(coloraxis_showscale=False)
+                st.plotly_chart(fig_periodos_kg, use_container_width=True)
+
+                with st.expander("📍 Ver comparativo por Estado dentro de cada período"):
+                    linhas_uf = []
+                    for label, sub in detalhes_por_periodo.items():
+                        if sub.empty:
+                            continue
+                        agg = sub.groupby("uf_destino", as_index=False).agg(
+                            total_frete=("vlr_frete", "sum"),
+                            total_venda=("vlr_pedido", "sum"),
+                        )
+                        agg["Período"] = label
+                        linhas_uf.append(agg)
+
+                    if linhas_uf:
+                        uf_comp = pd.concat(linhas_uf, ignore_index=True)
+                        fig_uf_periodos = px.bar(
+                            uf_comp, x="uf_destino", y="total_frete", color="Período", barmode="group",
+                            title="Total de Frete por Estado, comparado entre Períodos",
+                            labels={"uf_destino": "Estado", "total_frete": "Total Frete (R$)"},
+                        )
+                        st.plotly_chart(fig_uf_periodos, use_container_width=True)
+                    else:
+                        st.caption("Sem dados suficientes para detalhar por estado nos períodos selecionados.")
+
+                    periodo_detalhe_sel = st.selectbox(
+                        "Ver pedidos individuais de um período:",
+                        list(detalhes_por_periodo.keys()), key="periodo_detalhe_sel"
+                    )
+                    sub_sel = detalhes_por_periodo[periodo_detalhe_sel]
+                    if not sub_sel.empty:
+                        tbl_sel = sub_sel[[
+                            "cliente", "transportadora", "cidade_origem", "cidade_destino",
+                            "vlr_pedido", "peso", "vlr_frete", "tipo_frete"
+                        ]].copy()
+                        tbl_sel.columns = ["Cliente", "Transportadora", "Origem", "Destino",
+                                            "Venda (R$)", "Peso (Kg)", "Frete (R$)", "Tipo"]
+                        tbl_sel["Venda (R$)"] = tbl_sel["Venda (R$)"].apply(formata_moeda)
+                        tbl_sel["Frete (R$)"] = tbl_sel["Frete (R$)"].apply(formata_moeda)
+                        tbl_sel["Peso (Kg)"]  = tbl_sel["Peso (Kg)"].apply(formata_kg)
+                        st.dataframe(tbl_sel, use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("Nenhum pedido neste período.")
 
 # ─── Footer ───────────────────────────────────────────────────────────────────
 st.markdown("---")
