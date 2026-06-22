@@ -27,7 +27,7 @@ COLS = {
     "cidade_origem":  "NF: De (Cidade)",
     "vlr_pedido":     "NF: R$ Total",
     "peso":           "NF: Peso Bruto Kg",
-    "vlr_frete":      "DT: R$ Total Cobrado",
+    "vlr_frete":      "DT: R$ Entrega Cobrado",
     "tipo_frete":     "NF: CIF/FOB",
     "data":           "NF: Data Emissão",
 }
