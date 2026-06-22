@@ -313,6 +313,105 @@ def render_visao_estado(df_src: pd.DataFrame, key_prefix: str):
         fig_abs.update_layout(showlegend=False, coloraxis_showscale=False)
         st.plotly_chart(fig_abs, use_container_width=True, key=f"fig_abs_{key_prefix}")
 
+    # Clientes e Transportadoras no geral (todos os estados somados) — útil
+    # para quem aparece em mais de uma UF.
+    st.markdown("### 🌎 Clientes e Transportadoras (Geral — todos os estados)")
+    st.caption(
+        "Consolidado por cliente/transportadora somando todos os estados — "
+        "mostra quem opera em mais de uma UF."
+    )
+
+    col_cli_g, col_transp_g = st.columns(2)
+    with col_cli_g:
+        st.markdown("**👤 Clientes (todos os estados)**")
+        clientes_geral = (
+            df_src.groupby(C["cliente"], as_index=False)
+            .agg(
+                total_vendas=(C["vlr_pedido"], "sum"),
+                total_frete= (C["vlr_frete"],  "sum"),
+                qtd_pedidos= (C["vlr_pedido"], "count"),
+                qtd_estados= (C["uf_destino"], "nunique"),
+            )
+            .sort_values("total_frete", ascending=False)
+        )
+        clientes_geral["pct_frete"] = clientes_geral.apply(
+            lambda r: r["total_frete"] / r["total_vendas"] * 100 if r["total_vendas"] > 0 else 0, axis=1
+        )
+
+        so_multi_cli = st.checkbox(
+            "Mostrar só clientes em mais de 1 estado", key=f"so_multi_cli_{key_prefix}"
+        )
+        clientes_geral_show = (
+            clientes_geral[clientes_geral["qtd_estados"] > 1] if so_multi_cli else clientes_geral
+        )
+
+        tbl_cli_geral = clientes_geral_show.copy()
+        tbl_cli_geral.columns = [
+            "Cliente", "Total Vendas (R$)", "Total Frete (R$)", "Qtd Pedidos",
+            "Qtd Estados", "Frete/Venda (%)",
+        ]
+        tbl_cli_geral["Total Vendas (R$)"] = tbl_cli_geral["Total Vendas (R$)"].apply(formata_moeda)
+        tbl_cli_geral["Total Frete (R$)"]  = tbl_cli_geral["Total Frete (R$)"].apply(formata_moeda)
+        tbl_cli_geral["Frete/Venda (%)"]   = tbl_cli_geral["Frete/Venda (%)"].apply(formata_pct)
+        st.dataframe(tbl_cli_geral, use_container_width=True, hide_index=True)
+
+        clientes_geral_lista = clientes_geral_show[C["cliente"]].tolist()
+        if clientes_geral_lista:
+            cli_geral_sel = st.selectbox(
+                "Ver pedidos do cliente (todos os estados):", clientes_geral_lista,
+                key=f"cli_geral_sel_{key_prefix}",
+            )
+            detalhe_pedidos(
+                df_src[df_src[C["cliente"]] == cli_geral_sel],
+                f"{cli_geral_sel} (todos os estados)",
+            )
+
+    with col_transp_g:
+        st.markdown("**🚛 Transportadoras (todos os estados)**")
+        transp_geral = (
+            df_src.groupby(C["transportadora"], as_index=False)
+            .agg(
+                total_frete= (C["vlr_frete"], "sum"),
+                total_peso=  (C["peso"],      "sum"),
+                qtd_pedidos= (C["vlr_frete"], "count"),
+                qtd_estados= (C["uf_destino"], "nunique"),
+            )
+            .sort_values("total_frete", ascending=False)
+        )
+        transp_geral["rs_por_kg"] = transp_geral.apply(
+            lambda r: r["total_frete"] / r["total_peso"] if r["total_peso"] > 0 else 0, axis=1
+        )
+
+        so_multi_transp = st.checkbox(
+            "Mostrar só transportadoras em mais de 1 estado", key=f"so_multi_transp_{key_prefix}"
+        )
+        transp_geral_show = (
+            transp_geral[transp_geral["qtd_estados"] > 1] if so_multi_transp else transp_geral
+        )
+
+        tbl_transp_geral = transp_geral_show.copy()
+        tbl_transp_geral.columns = [
+            "Transportadora", "Total Frete (R$)", "Peso Total (Kg)", "Qtd Pedidos",
+            "Qtd Estados", "R$/Kg",
+        ]
+        tbl_transp_geral["Total Frete (R$)"] = tbl_transp_geral["Total Frete (R$)"].apply(formata_moeda)
+        tbl_transp_geral["Peso Total (Kg)"]  = tbl_transp_geral["Peso Total (Kg)"].apply(formata_kg)
+        tbl_transp_geral["R$/Kg"]            = tbl_transp_geral["R$/Kg"].apply(lambda v: f"R$ {v:.2f}")
+        st.dataframe(tbl_transp_geral, use_container_width=True, hide_index=True)
+
+        transp_geral_lista = transp_geral_show[C["transportadora"]].tolist()
+        if transp_geral_lista:
+            transp_geral_sel = st.selectbox(
+                "Ver pedidos da transportadora (todos os estados):", transp_geral_lista,
+                key=f"transp_geral_sel_{key_prefix}",
+            )
+            detalhe_pedidos(
+                df_src[df_src[C["transportadora"]] == transp_geral_sel],
+                f"{transp_geral_sel} (todos os estados)",
+            )
+
+    st.markdown("---")
+
     # Clientes e Transportadoras por UF
     st.markdown("### 🔍 Clientes e Transportadoras por Estado")
     uf_selecionada = st.selectbox("Selecione um Estado:", ufs_disponiveis, key=f"uf_{key_prefix}")
