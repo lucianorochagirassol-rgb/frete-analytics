@@ -221,6 +221,7 @@ def carregar_dados(arquivo) -> pd.DataFrame:
     df = pd.read_csv(arquivo, sep=None, engine="python", dtype=str)
     df.columns = df.columns.str.strip()
 
+    df["_frete_faltante"] = False
     for alias, col in COLS.items():
         if col not in df.columns:
             continue
@@ -231,7 +232,14 @@ def carregar_dados(arquivo) -> pd.DataFrame:
                 .str.replace(r"[^\d,\.]", "", regex=True)
                 .str.replace(",", ".", regex=False)
             )
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+            if alias == "vlr_frete":
+                # Marca pedidos sem nenhum valor na coluna de frete (em geral,
+                # romaneio/DT ainda não processado na origem) antes de zerar —
+                # usado para alertar o usuário, já que isso pode subestimar o
+                # frete total se for tratado como R$ 0,00 silenciosamente.
+                df["_frete_faltante"] = df[col].isna()
+            df[col] = df[col].fillna(0.0)
         elif alias in ("uf_destino", "cidade_destino", "cidade_origem",
                        "cliente", "transportadora", "tipo_frete"):
             df[col] = df[col].astype(str).str.strip()
@@ -593,6 +601,27 @@ with tab_upload:
                     "🟡 Não foi encontrada a coluna de data (\"NF: Data Emissão\") com datas válidas "
                     "neste CSV. O histórico detalhado e a comparação por períodos não estarão "
                     "disponíveis para esta competência."
+                )
+
+            if "_frete_faltante" in df.columns and df["_frete_faltante"].sum() > 0:
+                qtd_faltante = int(df["_frete_faltante"].sum())
+                pct_faltante = qtd_faltante / len(df) * 100
+                venda_faltante = df.loc[df["_frete_faltante"], C["vlr_pedido"]].sum()
+                ufs_faltantes = (
+                    df.loc[df["_frete_faltante"], C["uf_destino"]]
+                    .value_counts()
+                    .head(5)
+                )
+                ufs_txt = ", ".join(f"{uf} ({n})" for uf, n in ufs_faltantes.items())
+                st.warning(
+                    f"⚠️ **{qtd_faltante} pedido(s) ({pct_faltante:.0f}%) estão sem valor na coluna "
+                    f"de frete** (\"DT: R$ Entrega Cobrado\") — provavelmente o romaneio/DT ainda não "
+                    f"foi processado na origem quando este CSV foi exportado. Esses pedidos estão sendo "
+                    f"somados como **R$ 0,00 de frete**, o que pode subestimar o total e o %Frete/Venda.\n\n"
+                    f"Vendas envolvidas: {formata_moeda(venda_faltante)}. "
+                    f"Estados mais afetados: {ufs_txt}.\n\n"
+                    f"Recomendado: aguardar o romaneio fechar e reexportar antes de salvar esta "
+                    f"competência no histórico."
                 )
 
     if df is not None:
