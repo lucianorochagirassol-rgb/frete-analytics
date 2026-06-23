@@ -1,4 +1,5 @@
 import datetime
+import difflib
 import os
 import unicodedata
 import streamlit as st
@@ -198,6 +199,41 @@ def detalhe_pedidos(df_subset, titulo, key_prefix=""):
             C["vlr_pedido"]:     "Venda (R$)",
             C["peso"]:           "Peso (Kg)",
             C["vlr_frete"]:      "Frete (R$)",
+        }
+        tbl = tbl.rename(columns=rename)
+        if "Venda (R$)" in tbl.columns and "Frete (R$)" in tbl.columns:
+            tbl["Frete/Venda (%)"] = tbl.apply(
+                lambda r: r["Frete (R$)"] / r["Venda (R$)"] * 100 if r["Venda (R$)"] > 0 else 0, axis=1
+            ).apply(formata_pct)
+        if "Frete (R$)" in tbl.columns and "Peso (Kg)" in tbl.columns:
+            tbl["R$/Kg"] = tbl.apply(
+                lambda r: r["Frete (R$)"] / r["Peso (Kg)"] if r["Peso (Kg)"] > 0 else 0, axis=1
+            ).apply(lambda v: f"R$ {v:.2f}")
+        if "Venda (R$)" in tbl.columns:
+            tbl["Venda (R$)"] = tbl["Venda (R$)"].apply(formata_moeda)
+        if "Frete (R$)" in tbl.columns:
+            tbl["Frete (R$)"] = tbl["Frete (R$)"].apply(formata_moeda)
+        if "Peso (Kg)" in tbl.columns:
+            tbl["Peso (Kg)"] = tbl["Peso (Kg)"].apply(formata_kg)
+        st.dataframe(tbl, use_container_width=True, hide_index=True)
+
+def detalhe_pedidos_simples(df_subset, titulo, key_prefix=""):
+    """Como detalhe_pedidos, mas para DataFrames com nomes de coluna simples
+    (cliente, transportadora, vlr_pedido, peso, vlr_frete, ...) — usado para
+    dados que já vêm com esses nomes (histórico detalhado do Supabase ou o
+    arquivo atual já renomeado), em vez dos nomes literais do CSV (C[...])."""
+    with st.expander(f"🔎 Ver pedidos individuais — {titulo}"):
+        cols_disponiveis = [
+            "cliente", "transportadora", "cidade_origem", "cidade_destino",
+            "vlr_pedido", "peso", "vlr_frete",
+        ]
+        cols_disponiveis = [c for c in cols_disponiveis if c in df_subset.columns]
+        tbl = df_subset[cols_disponiveis].copy()
+
+        rename = {
+            "cliente": "Cliente", "transportadora": "Transportadora",
+            "cidade_origem": "Origem", "cidade_destino": "Destino",
+            "vlr_pedido": "Venda (R$)", "peso": "Peso (Kg)", "vlr_frete": "Frete (R$)",
         }
         tbl = tbl.rename(columns=rename)
         if "Venda (R$)" in tbl.columns and "Frete (R$)" in tbl.columns:
@@ -555,11 +591,12 @@ if mes_visao_sel and not pedidos_hist_sidebar.empty:
 
 st.markdown("## 🚚 Análise de Logística & Eficiência de Fretes")
 
-tab_upload, tab1, tab2, tab3 = st.tabs([
+tab_upload, tab1, tab2, tab3, tab_lgr = st.tabs([
     "📤 Upload Mensal",
     "📍 Visão por Estado",
     "🔬 Análise de Deficiência",
     "📊 Comparação Mensal",
+    "🏢 LGR",
 ])
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1045,6 +1082,181 @@ with tab3:
                         st.dataframe(tbl_sel, use_container_width=True, hide_index=True)
                     else:
                         st.caption("Nenhum pedido neste período.")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ABA 4 — LGR (filiais x clientes com "LGR" no nome)
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_lgr:
+    st.markdown("## 🏢 Análise LGR — Filiais x Clientes")
+    st.caption(
+        "Reúne todos os pedidos cujo nome do cliente contém **\"LGR\"** (em qualquer "
+        "variação de grafia, abreviação, acento ou caixa) e separa o frete enviado "
+        "para a própria empresa (filiais / transferências internas, que não deveriam "
+        "entrar nos indicadores de cliente) do frete enviado para clientes externos "
+        "que também têm \"LGR\" no nome. Hoje o filtro automático "
+        "(`remover_empresa_propria`) só exclui o nome exato "
+        f"**\"{EMPRESA_PROPRIA_CHAVE}\"** — variações de grafia continuam entrando "
+        "como se fossem clientes normais nas outras abas. Esta aba ajuda a identificar "
+        "essas variações."
+    )
+
+    fontes_lgr = []
+    pedidos_hist_lgr = carregar_pedidos_historico() if SUPABASE_DISPONIVEL else pd.DataFrame()
+    if not pedidos_hist_lgr.empty:
+        cols_hist = ["mes", "cliente", "transportadora", "uf_destino",
+                     "cidade_destino", "cidade_origem", "vlr_pedido", "peso", "vlr_frete"]
+        cols_hist = [c for c in cols_hist if c in pedidos_hist_lgr.columns]
+        sub_hist = pedidos_hist_lgr[cols_hist].copy()
+        sub_hist["fonte"] = "Histórico salvo"
+        fontes_lgr.append(sub_hist)
+    if df is not None:
+        atual_lgr = df.rename(columns={v: k for k, v in COLS.items()})
+        cols_atual = ["cliente", "transportadora", "uf_destino",
+                      "cidade_destino", "cidade_origem", "vlr_pedido", "peso", "vlr_frete"]
+        cols_atual = [c for c in cols_atual if c in atual_lgr.columns]
+        atual_lgr = atual_lgr[cols_atual].copy()
+        atual_lgr["mes"] = mes_competencia
+        atual_lgr["fonte"] = "Arquivo atual (ainda não salvo)"
+        fontes_lgr.append(atual_lgr)
+
+    if not fontes_lgr:
+        st.info(
+            "📂 Nenhum dado disponível ainda. Envie um CSV na aba **Upload Mensal** "
+            "ou salve algum mês no histórico detalhado para habilitar esta análise."
+        )
+    else:
+        df_base_lgr = pd.concat(fontes_lgr, ignore_index=True)
+        df_base_lgr["_cliente_norm"] = df_base_lgr["cliente"].apply(_normalizar_texto)
+        df_lgr = df_base_lgr[df_base_lgr["_cliente_norm"].str.contains("LGR", na=False)].copy()
+
+        if df_lgr.empty:
+            st.success("✅ Nenhum registro com \"LGR\" no nome do cliente foi encontrado nos dados carregados.")
+        else:
+            st.markdown(
+                f"**{len(df_lgr)} pedido(s)** encontrados com \"LGR\" no nome do cliente, "
+                f"em **{df_lgr['cliente'].nunique()}** variação(ões) de nome diferente(s)."
+            )
+
+            nomes_unicos = (
+                df_lgr.groupby("cliente", as_index=False)
+                .agg(
+                    qtd_pedidos=("vlr_pedido", "count"),
+                    total_venda=("vlr_pedido", "sum"),
+                    total_frete=("vlr_frete", "sum"),
+                    total_peso=("peso", "sum"),
+                )
+            )
+            nomes_unicos["_norm"] = nomes_unicos["cliente"].apply(_normalizar_texto)
+            nomes_unicos["ja_excluido"] = nomes_unicos["_norm"].str.contains(EMPRESA_PROPRIA_CHAVE, na=False)
+            nomes_unicos["similaridade"] = nomes_unicos["_norm"].apply(
+                lambda n: difflib.SequenceMatcher(None, n, EMPRESA_PROPRIA_CHAVE).ratio() * 100
+            )
+            nomes_unicos = nomes_unicos.sort_values("similaridade", ascending=False).reset_index(drop=True)
+
+            limiar = st.slider(
+                "🎯 Sensibilidade da sugestão automática — nomes com similaridade igual ou "
+                "maior ao nome oficial da empresa são sugeridos como **filial** "
+                "(transferência interna)",
+                min_value=0, max_value=100, value=55, step=5, key="lgr_limiar",
+            )
+            nomes_unicos["sugestao_filial"] = (
+                (nomes_unicos["similaridade"] >= limiar) | nomes_unicos["ja_excluido"]
+            )
+
+            st.caption(
+                "Ajuste a caixa **\"É filial?\"** na tabela abaixo se a sugestão automática "
+                "errar para algum nome — os totais e gráficos abaixo são recalculados na hora."
+            )
+
+            editor_input = nomes_unicos[[
+                "cliente", "ja_excluido", "similaridade", "qtd_pedidos",
+                "total_venda", "total_frete", "total_peso", "sugestao_filial",
+            ]].rename(columns={"sugestao_filial": "eh_filial"})
+
+            editado = st.data_editor(
+                editor_input,
+                column_config={
+                    "cliente": st.column_config.TextColumn("Cliente", disabled=True, width="large"),
+                    "ja_excluido": st.column_config.CheckboxColumn("Já excluído pelo filtro atual", disabled=True),
+                    "similaridade": st.column_config.NumberColumn("Similaridade c/ nome oficial", format="%.0f%%", disabled=True),
+                    "qtd_pedidos": st.column_config.NumberColumn("Qtd Pedidos", disabled=True),
+                    "total_venda": st.column_config.NumberColumn("Total Venda (R$)", format="R$ %.2f", disabled=True),
+                    "total_frete": st.column_config.NumberColumn("Total Frete (R$)", format="R$ %.2f", disabled=True),
+                    "total_peso": st.column_config.NumberColumn("Peso Total (Kg)", format="%.1f kg", disabled=True),
+                    "eh_filial": st.column_config.CheckboxColumn("É filial?"),
+                },
+                hide_index=True,
+                use_container_width=True,
+                key="lgr_data_editor",
+            )
+
+            mapa_filial = dict(zip(editado["cliente"], editado["eh_filial"]))
+            df_lgr["_eh_filial"] = df_lgr["cliente"].map(mapa_filial).fillna(False)
+
+            df_filiais  = df_lgr[df_lgr["_eh_filial"]]
+            df_clientes = df_lgr[~df_lgr["_eh_filial"]]
+
+            st.markdown("---")
+            st.markdown("### 📊 Totais — Filiais x Clientes")
+            col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+            col_f1.metric("🏭 Frete p/ Filiais", formata_moeda(df_filiais["vlr_frete"].sum()))
+            col_f2.metric("👤 Frete p/ Clientes", formata_moeda(df_clientes["vlr_frete"].sum()))
+            col_f3.metric("📦 Pedidos p/ Filiais", len(df_filiais))
+            col_f4.metric("📦 Pedidos p/ Clientes", len(df_clientes))
+
+            col_g1, col_g2 = st.columns(2)
+            with col_g1:
+                resumo_grupo = pd.DataFrame({
+                    "Grupo": ["Filiais", "Clientes"],
+                    "Total Venda": [df_filiais["vlr_pedido"].sum(), df_clientes["vlr_pedido"].sum()],
+                    "Total Frete": [df_filiais["vlr_frete"].sum(), df_clientes["vlr_frete"].sum()],
+                })
+                resumo_melt = resumo_grupo.melt(id_vars="Grupo", var_name="Indicador", value_name="Valor")
+                fig_grupo = px.bar(
+                    resumo_melt, x="Grupo", y="Valor", color="Indicador", barmode="group",
+                    title="Venda x Frete — Filiais vs Clientes (LGR)",
+                    labels={"Valor": "R$"},
+                )
+                st.plotly_chart(fig_grupo, use_container_width=True)
+
+            with col_g2:
+                if "mes" in df_lgr.columns and df_lgr["mes"].notna().any():
+                    por_mes = (
+                        df_lgr.groupby(["mes", "_eh_filial"], as_index=False)
+                        .agg(total_frete=("vlr_frete", "sum"))
+                    )
+                    por_mes["Grupo"] = por_mes["_eh_filial"].map({True: "Filiais", False: "Clientes"})
+                    fig_mes = px.bar(
+                        por_mes.sort_values("mes"), x="mes", y="total_frete", color="Grupo", barmode="group",
+                        title="Frete por Mês — Filiais vs Clientes (LGR)",
+                        labels={"mes": "Mês", "total_frete": "Total Frete (R$)"},
+                    )
+                    st.plotly_chart(fig_mes, use_container_width=True)
+                else:
+                    st.caption("Sem informação de mês disponível para o detalhamento temporal.")
+
+            st.markdown("---")
+            col_d1, col_d2 = st.columns(2)
+            with col_d1:
+                st.markdown("#### 🏭 Pedidos classificados como Filial")
+                if df_filiais.empty:
+                    st.caption("Nenhum pedido classificado como filial.")
+                else:
+                    detalhe_pedidos_simples(df_filiais, "Filiais (LGR)", key_prefix="lgr_filiais")
+            with col_d2:
+                st.markdown("#### 👤 Pedidos classificados como Cliente")
+                if df_clientes.empty:
+                    st.caption("Nenhum pedido classificado como cliente.")
+                else:
+                    detalhe_pedidos_simples(df_clientes, "Clientes (LGR)", key_prefix="lgr_clientes")
+
+            st.markdown("---")
+            st.caption(
+                "💡 Se algum nome marcado como **filial** aparecer com frequência, considere "
+                "adicionar essa variação na lista de exclusão automática "
+                "(`remover_empresa_propria`) para que ela já saia das outras abas sem precisar "
+                "ajustar esta tabela todo mês."
+            )
 
 # ─── Footer ───────────────────────────────────────────────────────────────────
 st.markdown("---")
