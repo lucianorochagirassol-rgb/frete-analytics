@@ -50,7 +50,7 @@ def _normalizar_texto(s) -> str:
 
 # Trecho distintivo do nome (sem sufixo societário) para casar variações como
 # "EIRELI", "LTDA", com ou sem acento, caixa alta/baixa, espaços extras, etc.
-EMPRESA_PROPRIA_CHAVE = "LGR INDUSTRIA DE COMERCIO DE PRODUTOS DE LIMPEZA"
+EMPRESA_PROPRIA_CHAVE = "LGR INDUSTRIA E COMERCIO DE PRODUTOS DE LIMPEZA"
 
 def remover_empresa_propria(df: pd.DataFrame) -> pd.DataFrame:
     """Remove pedidos cujo cliente é a própria empresa (transferência interna,
