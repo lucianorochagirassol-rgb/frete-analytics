@@ -48,22 +48,31 @@ def _normalizar_texto(s) -> str:
     s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
     return s
 
-# Trecho distintivo do nome (sem sufixo societário) para casar variações como
-# "EIRELI", "LTDA", com ou sem acento, caixa alta/baixa, espaços extras, etc.
+# Trecho distintivo do nome oficial da empresa (sem sufixo societário), usado
+# como referência de comparação/similaridade na aba LGR — para casar variações
+# como "EIRELI", "LTDA", com ou sem acento, caixa alta/baixa, espaços extras.
 EMPRESA_PROPRIA_CHAVE = "LGR INDUSTRIA E COMERCIO DE PRODUTOS DE LIMPEZA"
 
+# Termo usado para identificar QUALQUER cliente relacionado à LGR (própria
+# empresa/filial OU um cliente externo que por acaso também tenha "LGR" no
+# nome). Qualquer pedido que bata com esse termo é removido das abas de
+# indicadores de cliente e só é analisado na aba LGR — lá sim é feita a
+# separação entre filial e cliente de fato.
+TERMO_LGR = "LGR"
+
 def remover_empresa_propria(df: pd.DataFrame) -> pd.DataFrame:
-    """Remove pedidos cujo cliente é a própria empresa (transferência interna,
-    não é um cliente de fato e não deve entrar nos indicadores). Usa o nome
-    literal da coluna do CSV (C["cliente"]).
+    """Remove pedidos cujo cliente tem "LGR" no nome — sejam transferências
+    para a própria empresa/filial, sejam clientes externos que por acaso
+    também tenham "LGR" no nome. Usa o nome literal da coluna do CSV
+    (C["cliente"]).
     Importante: esse filtro deve ser aplicado apenas nas abas de indicadores de
     cliente (Upload, Visão por Estado, Deficiência, Comparação) — a aba LGR
     propositalmente usa os dados SEM esse filtro, pois o objetivo dela é
-    justamente analisar o frete gasto com transferências para a própria
-    empresa (filiais)."""
+    justamente reunir e analisar todo esse grupo (separando filial de
+    cliente de fato)."""
     if C["cliente"] not in df.columns:
         return df
-    mask = df[C["cliente"]].apply(_normalizar_texto).str.contains(EMPRESA_PROPRIA_CHAVE, na=False)
+    mask = df[C["cliente"]].apply(_normalizar_texto).str.contains(TERMO_LGR, na=False)
     return df[~mask].copy()
 
 def remover_empresa_propria_simples(df: pd.DataFrame) -> pd.DataFrame:
@@ -72,7 +81,7 @@ def remover_empresa_propria_simples(df: pd.DataFrame) -> pd.DataFrame:
     renomear) — usada na aba Comparação Mensal."""
     if "cliente" not in df.columns:
         return df
-    mask = df["cliente"].apply(_normalizar_texto).str.contains(EMPRESA_PROPRIA_CHAVE, na=False)
+    mask = df["cliente"].apply(_normalizar_texto).str.contains(TERMO_LGR, na=False)
     return df[~mask].copy()
 
 # ─── Conexão Supabase (histórico mensal e detalhado) ─────────────────────────
@@ -644,21 +653,21 @@ with tab_upload:
             st.error(f"⚠️ Colunas não encontradas no CSV:\n\n{faltando}\n\nVerifique se o arquivo está correto.")
             df = None
         else:
-            # "df" permanece com TODOS os pedidos (inclusive transferências
-            # para a própria empresa/filial) — é o que será salvo no histórico
-            # detalhado e o que alimenta a aba LGR. "df_sem_propria" é a versão
-            # filtrada usada só para as métricas de cliente exibidas aqui
-            # mesmo, na aba de Upload (a filial não deve contar como cliente
-            # em lugar nenhum exceto na aba LGR).
+            # "df" permanece com TODOS os pedidos (inclusive clientes/filiais
+            # com "LGR" no nome) — é o que será salvo no histórico detalhado e
+            # o que alimenta a aba LGR. "df_sem_propria" é a versão filtrada
+            # (sem nenhum nome contendo "LGR") usada só para as métricas de
+            # cliente exibidas aqui mesmo, na aba de Upload — esses registros
+            # só devem ser analisados na aba LGR.
             qtd_antes = len(df)
             df_sem_propria = remover_empresa_propria(df)
             qtd_removida = qtd_antes - len(df_sem_propria)
             if qtd_removida > 0:
                 st.caption(
-                    f"ℹ️ {qtd_removida} registro(s) da própria empresa (LGR Indústria e Comércio "
-                    f"de Produtos de Limpeza) foram identificados — não entram nas métricas de "
-                    f"cliente abaixo nem nas abas de Visão por Estado/Deficiência/Comparação, mas "
-                    f"continuam disponíveis para análise na aba **🏢 LGR**."
+                    f"ℹ️ {qtd_removida} registro(s) de clientes com \"LGR\" no nome foram "
+                    f"identificados — não entram nas métricas de cliente abaixo nem nas abas de "
+                    f"Visão por Estado/Deficiência/Comparação. Veja a separação entre filial e "
+                    f"cliente de fato na aba **🏢 LGR**."
                 )
             if C["data"] not in df.columns or df["_dt"].notna().sum() == 0:
                 st.warning(
@@ -1120,15 +1129,13 @@ with tab_lgr:
     st.markdown("## 🏢 Análise LGR — Filiais x Clientes")
     st.caption(
         "Reúne **todos** os pedidos cujo nome do cliente contém **\"LGR\"** (em qualquer "
-        "variação de grafia, abreviação, acento ou caixa) — inclusive os que batem com o "
-        "nome oficial exato da empresa — e separa o frete enviado para a própria empresa "
-        "(filiais / transferências internas) do frete enviado para clientes externos que "
-        "também têm \"LGR\" no nome. Esta é a única aba onde esses dados de filial aparecem: "
-        "nas demais abas (Upload, Visão por Estado, Deficiência, Comparação), o filtro "
-        "automático (`remover_empresa_propria`) já exclui o nome oficial "
-        f"**\"{EMPRESA_PROPRIA_CHAVE}\"** das métricas de cliente. Variações de grafia que o "
-        "filtro automático não reconhece (ex.: abreviações) ainda podem aparecer como cliente "
-        "nas outras abas — use a tabela abaixo para identificá-las e classificá-las."
+        "variação de grafia, abreviação, acento ou caixa) e separa o frete enviado para a "
+        "própria empresa (filiais / transferências internas) do frete enviado para clientes "
+        "externos que também têm \"LGR\" no nome. Esta é a **única** aba onde esses dados "
+        "aparecem: nas demais abas (Upload, Visão por Estado, Deficiência, Comparação), todo "
+        "cliente com \"LGR\" no nome — filial ou não — é removido das métricas, justamente para "
+        "ser analisado aqui. Use a tabela abaixo para marcar cada nome como **filial** "
+        "(transferência interna) ou **cliente** (venda de fato) e ver os totais separados."
     )
 
     fontes_lgr = []
@@ -1178,7 +1185,7 @@ with tab_lgr:
                 )
             )
             nomes_unicos["_norm"] = nomes_unicos["cliente"].apply(_normalizar_texto)
-            nomes_unicos["ja_excluido"] = nomes_unicos["_norm"].str.contains(EMPRESA_PROPRIA_CHAVE, na=False)
+            nomes_unicos["nome_oficial_exato"] = nomes_unicos["_norm"].str.contains(EMPRESA_PROPRIA_CHAVE, na=False)
             nomes_unicos["similaridade"] = nomes_unicos["_norm"].apply(
                 lambda n: difflib.SequenceMatcher(None, n, EMPRESA_PROPRIA_CHAVE).ratio() * 100
             )
@@ -1191,7 +1198,7 @@ with tab_lgr:
                 min_value=0, max_value=100, value=55, step=5, key="lgr_limiar",
             )
             nomes_unicos["sugestao_filial"] = (
-                (nomes_unicos["similaridade"] >= limiar) | nomes_unicos["ja_excluido"]
+                (nomes_unicos["similaridade"] >= limiar) | nomes_unicos["nome_oficial_exato"]
             )
 
             st.caption(
@@ -1200,7 +1207,7 @@ with tab_lgr:
             )
 
             editor_input = nomes_unicos[[
-                "cliente", "ja_excluido", "similaridade", "qtd_pedidos",
+                "cliente", "nome_oficial_exato", "similaridade", "qtd_pedidos",
                 "total_venda", "total_frete", "total_peso", "sugestao_filial",
             ]].rename(columns={"sugestao_filial": "eh_filial"})
 
@@ -1208,7 +1215,7 @@ with tab_lgr:
                 editor_input,
                 column_config={
                     "cliente": st.column_config.TextColumn("Cliente", disabled=True, width="large"),
-                    "ja_excluido": st.column_config.CheckboxColumn("Já excluído pelo filtro atual", disabled=True),
+                    "nome_oficial_exato": st.column_config.CheckboxColumn("Nome oficial exato?", disabled=True),
                     "similaridade": st.column_config.NumberColumn("Similaridade c/ nome oficial", format="%.0f%%", disabled=True),
                     "qtd_pedidos": st.column_config.NumberColumn("Qtd Pedidos", disabled=True),
                     "total_venda": st.column_config.NumberColumn("Total Venda (R$)", format="R$ %.2f", disabled=True),
