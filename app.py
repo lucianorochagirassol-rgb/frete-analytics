@@ -613,12 +613,17 @@ with tab_upload:
                     .head(5)
                 )
                 ufs_txt = ", ".join(f"{uf} ({n})" for uf, n in ufs_faltantes.items())
+                # Obs.: o "$" precisa vir escapado como "\$" nas strings abaixo —
+                # st.warning renderiza markdown, e um "$" sozinho é interpretado
+                # como delimitador de fórmula matemática (LaTeX), o que faz o
+                # caractere "$" e parte do texto desaparecerem na tela.
+                venda_faltante_fmt = formata_moeda(venda_faltante).replace("$", r"\$")
                 st.warning(
                     f"⚠️ **{qtd_faltante} pedido(s) ({pct_faltante:.0f}%) estão sem valor na coluna "
-                    f"de frete** (\"DT: R$ Entrega Cobrado\") — provavelmente o romaneio/DT ainda não "
+                    f"de frete** (\"DT: R\\$ Entrega Cobrado\") — provavelmente o romaneio/DT ainda não "
                     f"foi processado na origem quando este CSV foi exportado. Esses pedidos estão sendo "
-                    f"somados como **R$ 0,00 de frete**, o que pode subestimar o total e o %Frete/Venda.\n\n"
-                    f"Vendas envolvidas: {formata_moeda(venda_faltante)}. "
+                    f"somados como **R\\$ 0,00 de frete**, o que pode subestimar o total e o %Frete/Venda.\n\n"
+                    f"Vendas envolvidas: {venda_faltante_fmt}. "
                     f"Estados mais afetados: {ufs_txt}.\n\n"
                     f"Recomendado: aguardar o romaneio fechar e reexportar antes de salvar esta "
                     f"competência no histórico."
