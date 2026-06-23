@@ -176,12 +176,33 @@ def salvar_pedidos_detalhados(mes: str, df: pd.DataFrame) -> tuple[int, int]:
 @st.cache_data(ttl=300)
 def carregar_pedidos_historico() -> pd.DataFrame:
     """Busca todos os pedidos individuais salvos no histórico detalhado.
-    Cache de 5 minutos."""
+    Cache de 5 minutos.
+    Importante: o Supabase/PostgREST limita cada chamada a no máximo 1000
+    linhas por padrão. Sem paginação, à medida que a tabela cresce, linhas
+    mais antigas (inclusive da LGR) deixam de ser retornadas silenciosamente,
+    fazendo os totais "encolherem" sem nenhuma mudança real nos dados ou no
+    filtro. Por isso buscamos em páginas de 1000 até não vir mais nada."""
     if not SUPABASE_DISPONIVEL:
         return pd.DataFrame()
     client = get_supabase_client()
-    resp = client.table(TABELA_PEDIDOS).select("*").execute()
-    dfh = pd.DataFrame(resp.data)
+    TAMANHO_PAGINA = 1000
+    paginas = []
+    inicio = 0
+    while True:
+        resp = (
+            client.table(TABELA_PEDIDOS)
+            .select("*")
+            .range(inicio, inicio + TAMANHO_PAGINA - 1)
+            .execute()
+        )
+        lote = resp.data
+        if not lote:
+            break
+        paginas.append(pd.DataFrame(lote))
+        if len(lote) < TAMANHO_PAGINA:
+            break
+        inicio += TAMANHO_PAGINA
+    dfh = pd.concat(paginas, ignore_index=True) if paginas else pd.DataFrame()
     if not dfh.empty:
         dfh["_dt"] = pd.to_datetime(dfh["data"], errors="coerce")
     return dfh
