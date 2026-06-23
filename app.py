@@ -54,10 +54,25 @@ EMPRESA_PROPRIA_CHAVE = "LGR INDUSTRIA E COMERCIO DE PRODUTOS DE LIMPEZA"
 
 def remover_empresa_propria(df: pd.DataFrame) -> pd.DataFrame:
     """Remove pedidos cujo cliente é a própria empresa (transferência interna,
-    não é um cliente de fato e não deve entrar nos indicadores)."""
+    não é um cliente de fato e não deve entrar nos indicadores). Usa o nome
+    literal da coluna do CSV (C["cliente"]).
+    Importante: esse filtro deve ser aplicado apenas nas abas de indicadores de
+    cliente (Upload, Visão por Estado, Deficiência, Comparação) — a aba LGR
+    propositalmente usa os dados SEM esse filtro, pois o objetivo dela é
+    justamente analisar o frete gasto com transferências para a própria
+    empresa (filiais)."""
     if C["cliente"] not in df.columns:
         return df
     mask = df[C["cliente"]].apply(_normalizar_texto).str.contains(EMPRESA_PROPRIA_CHAVE, na=False)
+    return df[~mask].copy()
+
+def remover_empresa_propria_simples(df: pd.DataFrame) -> pd.DataFrame:
+    """Como remover_empresa_propria, mas para DataFrames com a coluna
+    simplificada "cliente" (histórico detalhado do Supabase já carregado sem
+    renomear) — usada na aba Comparação Mensal."""
+    if "cliente" not in df.columns:
+        return df
+    mask = df["cliente"].apply(_normalizar_texto).str.contains(EMPRESA_PROPRIA_CHAVE, na=False)
     return df[~mask].copy()
 
 # ─── Conexão Supabase (histórico mensal e detalhado) ─────────────────────────
@@ -583,11 +598,15 @@ with st.sidebar:
 
 # Dados do mês selecionado na barra lateral — usados nas abas "Visão por Estado"
 # e "Análise de Deficiência", que agora sempre mostram o histórico salvo no
-# banco (e não o arquivo recém-enviado na aba de Upload).
+# banco (e não o arquivo recém-enviado na aba de Upload). O histórico salvo
+# contém TODOS os pedidos (inclusive transferências para a própria empresa),
+# então o filtro é aplicado aqui — essas duas abas nunca mostram a própria
+# empresa como se fosse cliente.
 df_mes_sel = None
 if mes_visao_sel and not pedidos_hist_sidebar.empty:
     df_mes_sel = pedidos_hist_sidebar[pedidos_hist_sidebar["mes"] == mes_visao_sel].copy()
     df_mes_sel = df_mes_sel.rename(columns=RENAME_HIST_PARA_CSV)
+    df_mes_sel = remover_empresa_propria(df_mes_sel)
 
 st.markdown("## 🚚 Análise de Logística & Eficiência de Fretes")
 
@@ -625,13 +644,21 @@ with tab_upload:
             st.error(f"⚠️ Colunas não encontradas no CSV:\n\n{faltando}\n\nVerifique se o arquivo está correto.")
             df = None
         else:
+            # "df" permanece com TODOS os pedidos (inclusive transferências
+            # para a própria empresa/filial) — é o que será salvo no histórico
+            # detalhado e o que alimenta a aba LGR. "df_sem_propria" é a versão
+            # filtrada usada só para as métricas de cliente exibidas aqui
+            # mesmo, na aba de Upload (a filial não deve contar como cliente
+            # em lugar nenhum exceto na aba LGR).
             qtd_antes = len(df)
-            df = remover_empresa_propria(df)
-            qtd_removida = qtd_antes - len(df)
+            df_sem_propria = remover_empresa_propria(df)
+            qtd_removida = qtd_antes - len(df_sem_propria)
             if qtd_removida > 0:
                 st.caption(
-                    f"ℹ️ {qtd_removida} registro(s) da própria empresa (LGR Indústria de Comércio "
-                    f"de Produtos de Limpeza) foram excluídos da análise — não são clientes."
+                    f"ℹ️ {qtd_removida} registro(s) da própria empresa (LGR Indústria e Comércio "
+                    f"de Produtos de Limpeza) foram identificados — não entram nas métricas de "
+                    f"cliente abaixo nem nas abas de Visão por Estado/Deficiência/Comparação, mas "
+                    f"continuam disponíveis para análise na aba **🏢 LGR**."
                 )
             if C["data"] not in df.columns or df["_dt"].notna().sum() == 0:
                 st.warning(
@@ -640,12 +667,12 @@ with tab_upload:
                     "disponíveis para esta competência."
                 )
 
-            if "_frete_faltante" in df.columns and df["_frete_faltante"].sum() > 0:
-                qtd_faltante = int(df["_frete_faltante"].sum())
-                pct_faltante = qtd_faltante / len(df) * 100
-                venda_faltante = df.loc[df["_frete_faltante"], C["vlr_pedido"]].sum()
+            if "_frete_faltante" in df_sem_propria.columns and df_sem_propria["_frete_faltante"].sum() > 0:
+                qtd_faltante = int(df_sem_propria["_frete_faltante"].sum())
+                pct_faltante = qtd_faltante / len(df_sem_propria) * 100
+                venda_faltante = df_sem_propria.loc[df_sem_propria["_frete_faltante"], C["vlr_pedido"]].sum()
                 ufs_faltantes = (
-                    df.loc[df["_frete_faltante"], C["uf_destino"]]
+                    df_sem_propria.loc[df_sem_propria["_frete_faltante"], C["uf_destino"]]
                     .value_counts()
                     .head(5)
                 )
@@ -668,9 +695,9 @@ with tab_upload:
 
     if df is not None:
         st.markdown("---")
-        total_pedidos = df[C["vlr_pedido"]].sum()
-        total_frete   = df[C["vlr_frete"]].sum()
-        total_peso    = df[C["peso"]].sum()
+        total_pedidos = df_sem_propria[C["vlr_pedido"]].sum()
+        total_frete   = df_sem_propria[C["vlr_frete"]].sum()
+        total_peso    = df_sem_propria[C["peso"]].sum()
         pct_global    = (total_frete / total_pedidos * 100) if total_pedidos > 0 else 0
 
         col1, col2, col3, col4 = st.columns(4)
@@ -919,7 +946,10 @@ with tab3:
             "**📤 Upload Mensal** (botão **Salvar dados detalhados**)."
         )
 
-        pedidos_hist = carregar_pedidos_historico()
+        # O histórico salvo contém todos os pedidos (inclusive transferências
+        # para a própria empresa) — removidos aqui para que a comparação por
+        # períodos reflita só clientes de fato (filial fica restrita à aba LGR).
+        pedidos_hist = remover_empresa_propria_simples(carregar_pedidos_historico())
 
         if pedidos_hist.empty:
             st.info(
@@ -1089,15 +1119,16 @@ with tab3:
 with tab_lgr:
     st.markdown("## 🏢 Análise LGR — Filiais x Clientes")
     st.caption(
-        "Reúne todos os pedidos cujo nome do cliente contém **\"LGR\"** (em qualquer "
-        "variação de grafia, abreviação, acento ou caixa) e separa o frete enviado "
-        "para a própria empresa (filiais / transferências internas, que não deveriam "
-        "entrar nos indicadores de cliente) do frete enviado para clientes externos "
-        "que também têm \"LGR\" no nome. Hoje o filtro automático "
-        "(`remover_empresa_propria`) só exclui o nome exato "
-        f"**\"{EMPRESA_PROPRIA_CHAVE}\"** — variações de grafia continuam entrando "
-        "como se fossem clientes normais nas outras abas. Esta aba ajuda a identificar "
-        "essas variações."
+        "Reúne **todos** os pedidos cujo nome do cliente contém **\"LGR\"** (em qualquer "
+        "variação de grafia, abreviação, acento ou caixa) — inclusive os que batem com o "
+        "nome oficial exato da empresa — e separa o frete enviado para a própria empresa "
+        "(filiais / transferências internas) do frete enviado para clientes externos que "
+        "também têm \"LGR\" no nome. Esta é a única aba onde esses dados de filial aparecem: "
+        "nas demais abas (Upload, Visão por Estado, Deficiência, Comparação), o filtro "
+        "automático (`remover_empresa_propria`) já exclui o nome oficial "
+        f"**\"{EMPRESA_PROPRIA_CHAVE}\"** das métricas de cliente. Variações de grafia que o "
+        "filtro automático não reconhece (ex.: abreviações) ainda podem aparecer como cliente "
+        "nas outras abas — use a tabela abaixo para identificá-las e classificá-las."
     )
 
     fontes_lgr = []
