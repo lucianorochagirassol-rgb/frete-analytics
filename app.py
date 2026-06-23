@@ -225,6 +225,23 @@ def formata_pct(valor):
 def formata_kg(valor):
     return f"{valor:,.1f} kg".replace(",", "X").replace(".", ",").replace("X", ".")
 
+# Column_config para colunas numéricas exibidas em st.dataframe. Importante:
+# NÃO converter esses valores para texto formatado (ex.: "R$ 1.234,56") antes
+# de exibir — o Streamlit ordena pelo conteúdo da coluna ao clicar no
+# cabeçalho, e uma coluna de texto é ordenada como string (faz "10" vir antes
+# de "2"). Mantendo o valor numérico e só aplicando o formato de exibição via
+# column_config, a ordenação funciona corretamente. Limitação do Streamlit:
+# o format aqui é printf puro, sem separador de milhar nem vírgula decimal —
+# por isso o visual passa a ser "R$ 1234.56" em vez de "R$ 1.234,56".
+def col_moeda(decimais=2):
+    return st.column_config.NumberColumn(format=f"R$ %.{decimais}f")
+
+def col_pct(decimais=2):
+    return st.column_config.NumberColumn(format=f"%.{decimais}f%%")
+
+def col_kg(decimais=1):
+    return st.column_config.NumberColumn(format=f"%.{decimais}f kg")
+
 def detalhe_pedidos(df_subset, titulo, key_prefix=""):
     """Exibe expander com os pedidos individuais que compõem um total."""
     with st.expander(f"🔎 Ver pedidos individuais — {titulo}"):
@@ -249,18 +266,18 @@ def detalhe_pedidos(df_subset, titulo, key_prefix=""):
         if "Venda (R$)" in tbl.columns and "Frete (R$)" in tbl.columns:
             tbl["Frete/Venda (%)"] = tbl.apply(
                 lambda r: r["Frete (R$)"] / r["Venda (R$)"] * 100 if r["Venda (R$)"] > 0 else 0, axis=1
-            ).apply(formata_pct)
+            )
         if "Frete (R$)" in tbl.columns and "Peso (Kg)" in tbl.columns:
             tbl["R$/Kg"] = tbl.apply(
                 lambda r: r["Frete (R$)"] / r["Peso (Kg)"] if r["Peso (Kg)"] > 0 else 0, axis=1
-            ).apply(lambda v: f"R$ {v:.2f}")
-        if "Venda (R$)" in tbl.columns:
-            tbl["Venda (R$)"] = tbl["Venda (R$)"].apply(formata_moeda)
-        if "Frete (R$)" in tbl.columns:
-            tbl["Frete (R$)"] = tbl["Frete (R$)"].apply(formata_moeda)
-        if "Peso (Kg)" in tbl.columns:
-            tbl["Peso (Kg)"] = tbl["Peso (Kg)"].apply(formata_kg)
-        st.dataframe(tbl, use_container_width=True, hide_index=True)
+            )
+        st.dataframe(
+            tbl, use_container_width=True, hide_index=True,
+            column_config={
+                "Venda (R$)": col_moeda(), "Frete (R$)": col_moeda(),
+                "Peso (Kg)": col_kg(), "Frete/Venda (%)": col_pct(), "R$/Kg": col_moeda(),
+            },
+        )
 
 def detalhe_pedidos_simples(df_subset, titulo, key_prefix=""):
     """Como detalhe_pedidos, mas para DataFrames com nomes de coluna simples
@@ -284,18 +301,18 @@ def detalhe_pedidos_simples(df_subset, titulo, key_prefix=""):
         if "Venda (R$)" in tbl.columns and "Frete (R$)" in tbl.columns:
             tbl["Frete/Venda (%)"] = tbl.apply(
                 lambda r: r["Frete (R$)"] / r["Venda (R$)"] * 100 if r["Venda (R$)"] > 0 else 0, axis=1
-            ).apply(formata_pct)
+            )
         if "Frete (R$)" in tbl.columns and "Peso (Kg)" in tbl.columns:
             tbl["R$/Kg"] = tbl.apply(
                 lambda r: r["Frete (R$)"] / r["Peso (Kg)"] if r["Peso (Kg)"] > 0 else 0, axis=1
-            ).apply(lambda v: f"R$ {v:.2f}")
-        if "Venda (R$)" in tbl.columns:
-            tbl["Venda (R$)"] = tbl["Venda (R$)"].apply(formata_moeda)
-        if "Frete (R$)" in tbl.columns:
-            tbl["Frete (R$)"] = tbl["Frete (R$)"].apply(formata_moeda)
-        if "Peso (Kg)" in tbl.columns:
-            tbl["Peso (Kg)"] = tbl["Peso (Kg)"].apply(formata_kg)
-        st.dataframe(tbl, use_container_width=True, hide_index=True)
+            )
+        st.dataframe(
+            tbl, use_container_width=True, hide_index=True,
+            column_config={
+                "Venda (R$)": col_moeda(), "Frete (R$)": col_moeda(),
+                "Peso (Kg)": col_kg(), "Frete/Venda (%)": col_pct(), "R$/Kg": col_moeda(),
+            },
+        )
 
 @st.cache_data
 def carregar_dados(arquivo) -> pd.DataFrame:
@@ -374,12 +391,14 @@ def render_visao_estado(df_src: pd.DataFrame, key_prefix: str):
         "Estado", "Total Vendas (R$)", "Total Frete (R$)",
         "Peso Total (Kg)", "Qtd Pedidos", "R$/Kg (Frete/Peso)", "Frete/Venda (%)"
     ]
-    for col_m in ["Total Vendas (R$)", "Total Frete (R$)"]:
-        display_uf[col_m] = display_uf[col_m].apply(formata_moeda)
-    display_uf["Peso Total (Kg)"]    = display_uf["Peso Total (Kg)"].apply(formata_kg)
-    display_uf["R$/Kg (Frete/Peso)"] = display_uf["R$/Kg (Frete/Peso)"].apply(lambda v: f"R$ {v:.2f}")
-    display_uf["Frete/Venda (%)"]    = display_uf["Frete/Venda (%)"].apply(formata_pct)
-    st.dataframe(display_uf, use_container_width=True, hide_index=True)
+    st.dataframe(
+        display_uf, use_container_width=True, hide_index=True,
+        column_config={
+            "Total Vendas (R$)": col_moeda(), "Total Frete (R$)": col_moeda(),
+            "Peso Total (Kg)": col_kg(), "R$/Kg (Frete/Peso)": col_moeda(),
+            "Frete/Venda (%)": col_pct(),
+        },
+    )
 
     # Detalhamento por estado
     ufs_disponiveis = sorted(agg_uf[C["uf_destino"]].tolist())
@@ -450,12 +469,13 @@ def render_visao_estado(df_src: pd.DataFrame, key_prefix: str):
             "Cliente", "Total Vendas (R$)", "Total Frete (R$)", "Peso Total (Kg)", "Qtd Pedidos",
             "Qtd Estados", "Frete/Venda (%)", "R$/Kg",
         ]
-        tbl_cli_geral["Total Vendas (R$)"] = tbl_cli_geral["Total Vendas (R$)"].apply(formata_moeda)
-        tbl_cli_geral["Total Frete (R$)"]  = tbl_cli_geral["Total Frete (R$)"].apply(formata_moeda)
-        tbl_cli_geral["Peso Total (Kg)"]   = tbl_cli_geral["Peso Total (Kg)"].apply(formata_kg)
-        tbl_cli_geral["Frete/Venda (%)"]   = tbl_cli_geral["Frete/Venda (%)"].apply(formata_pct)
-        tbl_cli_geral["R$/Kg"]             = tbl_cli_geral["R$/Kg"].apply(lambda v: f"R$ {v:.2f}")
-        st.dataframe(tbl_cli_geral, use_container_width=True, hide_index=True)
+        st.dataframe(
+            tbl_cli_geral, use_container_width=True, hide_index=True,
+            column_config={
+                "Total Vendas (R$)": col_moeda(), "Total Frete (R$)": col_moeda(),
+                "Peso Total (Kg)": col_kg(), "Frete/Venda (%)": col_pct(), "R$/Kg": col_moeda(),
+            },
+        )
 
         clientes_geral_lista = clientes_geral_show[C["cliente"]].tolist()
         if clientes_geral_lista:
@@ -500,12 +520,13 @@ def render_visao_estado(df_src: pd.DataFrame, key_prefix: str):
             "Transportadora", "Total Vendas (R$)", "Total Frete (R$)", "Peso Total (Kg)", "Qtd Pedidos",
             "Qtd Estados", "R$/Kg", "Frete/Venda (%)",
         ]
-        tbl_transp_geral["Total Vendas (R$)"] = tbl_transp_geral["Total Vendas (R$)"].apply(formata_moeda)
-        tbl_transp_geral["Total Frete (R$)"] = tbl_transp_geral["Total Frete (R$)"].apply(formata_moeda)
-        tbl_transp_geral["Peso Total (Kg)"]  = tbl_transp_geral["Peso Total (Kg)"].apply(formata_kg)
-        tbl_transp_geral["R$/Kg"]            = tbl_transp_geral["R$/Kg"].apply(lambda v: f"R$ {v:.2f}")
-        tbl_transp_geral["Frete/Venda (%)"]  = tbl_transp_geral["Frete/Venda (%)"].apply(formata_pct)
-        st.dataframe(tbl_transp_geral, use_container_width=True, hide_index=True)
+        st.dataframe(
+            tbl_transp_geral, use_container_width=True, hide_index=True,
+            column_config={
+                "Total Vendas (R$)": col_moeda(), "Total Frete (R$)": col_moeda(),
+                "Peso Total (Kg)": col_kg(), "R$/Kg": col_moeda(), "Frete/Venda (%)": col_pct(),
+            },
+        )
 
         transp_geral_lista = transp_geral_show[C["transportadora"]].tolist()
         if transp_geral_lista:
@@ -549,12 +570,13 @@ def render_visao_estado(df_src: pd.DataFrame, key_prefix: str):
             "Cliente", "Total Vendas (R$)", "Total Frete (R$)", "Peso Total (Kg)",
             "Qtd Pedidos", "Frete/Venda (%)", "R$/Kg",
         ]
-        tbl_cli_uf["Total Vendas (R$)"] = tbl_cli_uf["Total Vendas (R$)"].apply(formata_moeda)
-        tbl_cli_uf["Total Frete (R$)"]  = tbl_cli_uf["Total Frete (R$)"].apply(formata_moeda)
-        tbl_cli_uf["Peso Total (Kg)"]   = tbl_cli_uf["Peso Total (Kg)"].apply(formata_kg)
-        tbl_cli_uf["Frete/Venda (%)"]   = tbl_cli_uf["Frete/Venda (%)"].apply(formata_pct)
-        tbl_cli_uf["R$/Kg"]             = tbl_cli_uf["R$/Kg"].apply(lambda v: f"R$ {v:.2f}")
-        st.dataframe(tbl_cli_uf, use_container_width=True, hide_index=True)
+        st.dataframe(
+            tbl_cli_uf, use_container_width=True, hide_index=True,
+            column_config={
+                "Total Vendas (R$)": col_moeda(), "Total Frete (R$)": col_moeda(),
+                "Peso Total (Kg)": col_kg(), "Frete/Venda (%)": col_pct(), "R$/Kg": col_moeda(),
+            },
+        )
 
         clientes_lista = clientes_uf[C["cliente"]].tolist()
         cli_sel = st.selectbox("Ver pedidos do cliente:", clientes_lista, key=f"cli_sel_{key_prefix}")
@@ -583,12 +605,13 @@ def render_visao_estado(df_src: pd.DataFrame, key_prefix: str):
             "Transportadora", "Total Vendas (R$)", "Total Frete (R$)", "Peso Total (Kg)",
             "Qtd Pedidos", "R$/Kg", "Frete/Venda (%)",
         ]
-        tbl_transp_uf["Total Vendas (R$)"] = tbl_transp_uf["Total Vendas (R$)"].apply(formata_moeda)
-        tbl_transp_uf["Total Frete (R$)"] = tbl_transp_uf["Total Frete (R$)"].apply(formata_moeda)
-        tbl_transp_uf["Peso Total (Kg)"]  = tbl_transp_uf["Peso Total (Kg)"].apply(formata_kg)
-        tbl_transp_uf["R$/Kg"]            = tbl_transp_uf["R$/Kg"].apply(lambda v: f"R$ {v:.2f}")
-        tbl_transp_uf["Frete/Venda (%)"]  = tbl_transp_uf["Frete/Venda (%)"].apply(formata_pct)
-        st.dataframe(tbl_transp_uf, use_container_width=True, hide_index=True)
+        st.dataframe(
+            tbl_transp_uf, use_container_width=True, hide_index=True,
+            column_config={
+                "Total Vendas (R$)": col_moeda(), "Total Frete (R$)": col_moeda(),
+                "Peso Total (Kg)": col_kg(), "R$/Kg": col_moeda(), "Frete/Venda (%)": col_pct(),
+            },
+        )
 
         transp_lista = transp_uf[C["transportadora"]].tolist()
         transp_sel = st.selectbox("Ver pedidos da transportadora:", transp_lista, key=f"transp_sel_{key_prefix}")
@@ -852,12 +875,13 @@ with tab2:
                     "Cliente", "Total Venda (R$)", "Total Frete (R$)", "Peso Total (Kg)",
                     "Qtd Pedidos", "Frete/Venda (%)", "R$/Kg",
                 ]
-                tbl_cli["Total Venda (R$)"] = tbl_cli["Total Venda (R$)"].apply(formata_moeda)
-                tbl_cli["Total Frete (R$)"] = tbl_cli["Total Frete (R$)"].apply(formata_moeda)
-                tbl_cli["Peso Total (Kg)"]  = tbl_cli["Peso Total (Kg)"].apply(formata_kg)
-                tbl_cli["Frete/Venda (%)"]  = tbl_cli["Frete/Venda (%)"].apply(formata_pct)
-                tbl_cli["R$/Kg"]            = tbl_cli["R$/Kg"].apply(lambda v: f"R$ {v:.2f}")
-                st.dataframe(tbl_cli, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    tbl_cli, use_container_width=True, hide_index=True,
+                    column_config={
+                        "Total Venda (R$)": col_moeda(), "Total Frete (R$)": col_moeda(),
+                        "Peso Total (Kg)": col_kg(), "Frete/Venda (%)": col_pct(), "R$/Kg": col_moeda(),
+                    },
+                )
 
             clientes_deep = cliente_agg[C["cliente"]].tolist()
             cli_deep_sel = st.selectbox(
@@ -926,13 +950,14 @@ with tab2:
                         "Transportadora", "Total Venda (R$)", "Total Frete (R$)", "Peso Total (Kg)",
                         "Qtd Embarques", "Ticket Médio (R$)", "R$/Kg", "Frete/Venda (%)"
                     ]
-                    tbl_rota["Total Venda (R$)"]  = tbl_rota["Total Venda (R$)"].apply(formata_moeda)
-                    tbl_rota["Total Frete (R$)"]  = tbl_rota["Total Frete (R$)"].apply(formata_moeda)
-                    tbl_rota["Peso Total (Kg)"]   = tbl_rota["Peso Total (Kg)"].apply(formata_kg)
-                    tbl_rota["Ticket Médio (R$)"] = tbl_rota["Ticket Médio (R$)"].apply(formata_moeda)
-                    tbl_rota["R$/Kg"]             = tbl_rota["R$/Kg"].apply(lambda v: f"R$ {v:.4f}")
-                    tbl_rota["Frete/Venda (%)"]   = tbl_rota["Frete/Venda (%)"].apply(formata_pct)
-                    st.dataframe(tbl_rota, use_container_width=True, hide_index=True)
+                    st.dataframe(
+                        tbl_rota, use_container_width=True, hide_index=True,
+                        column_config={
+                            "Total Venda (R$)": col_moeda(), "Total Frete (R$)": col_moeda(),
+                            "Peso Total (Kg)": col_kg(), "Ticket Médio (R$)": col_moeda(),
+                            "R$/Kg": col_moeda(decimais=4), "Frete/Venda (%)": col_pct(),
+                        },
+                    )
 
                     transp_rota_lista = rota_agg[C["transportadora"]].tolist()
                     transp_rota_sel = st.selectbox(
@@ -1057,13 +1082,14 @@ with tab3:
                 )
 
                 tbl_periodos = comp_periodos.copy()
-                tbl_periodos["Venda Total"]       = tbl_periodos["Venda Total"].apply(formata_moeda)
-                tbl_periodos["Frete Total"]       = tbl_periodos["Frete Total"].apply(formata_moeda)
-                tbl_periodos["Peso Total"]        = tbl_periodos["Peso Total"].apply(formata_kg)
-                tbl_periodos["Frete/Venda (%)"]   = tbl_periodos["Frete/Venda (%)"].apply(formata_pct)
-                tbl_periodos["R$/Kg"]             = tbl_periodos["R$/Kg"].apply(lambda v: f"R$ {v:.2f}")
-                tbl_periodos["Δ Frete vs 1º (%)"] = tbl_periodos["Δ Frete vs 1º (%)"].apply(lambda v: f"{v:+.1f}%")
-                st.dataframe(tbl_periodos, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    tbl_periodos, use_container_width=True, hide_index=True,
+                    column_config={
+                        "Venda Total": col_moeda(), "Frete Total": col_moeda(),
+                        "Peso Total": col_kg(), "Frete/Venda (%)": col_pct(), "R$/Kg": col_moeda(),
+                        "Δ Frete vs 1º (%)": st.column_config.NumberColumn(format="%+.1f%%"),
+                    },
+                )
 
                 col_p1, col_p2 = st.columns(2)
                 with col_p1:
@@ -1132,14 +1158,17 @@ with tab3:
                                             "Venda (R$)", "Peso (Kg)", "Frete (R$)"]
                         tbl_sel["Frete/Venda (%)"] = tbl_sel.apply(
                             lambda r: r["Frete (R$)"] / r["Venda (R$)"] * 100 if r["Venda (R$)"] > 0 else 0, axis=1
-                        ).apply(formata_pct)
+                        )
                         tbl_sel["R$/Kg"] = tbl_sel.apply(
                             lambda r: r["Frete (R$)"] / r["Peso (Kg)"] if r["Peso (Kg)"] > 0 else 0, axis=1
-                        ).apply(lambda v: f"R$ {v:.2f}")
-                        tbl_sel["Venda (R$)"] = tbl_sel["Venda (R$)"].apply(formata_moeda)
-                        tbl_sel["Frete (R$)"] = tbl_sel["Frete (R$)"].apply(formata_moeda)
-                        tbl_sel["Peso (Kg)"]  = tbl_sel["Peso (Kg)"].apply(formata_kg)
-                        st.dataframe(tbl_sel, use_container_width=True, hide_index=True)
+                        )
+                        st.dataframe(
+                            tbl_sel, use_container_width=True, hide_index=True,
+                            column_config={
+                                "Venda (R$)": col_moeda(), "Frete (R$)": col_moeda(),
+                                "Peso (Kg)": col_kg(), "Frete/Venda (%)": col_pct(), "R$/Kg": col_moeda(),
+                            },
+                        )
                     else:
                         st.caption("Nenhum pedido neste período.")
 
