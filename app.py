@@ -342,6 +342,20 @@ def carregar_dados(arquivo) -> pd.DataFrame:
                        "cliente", "transportadora", "tipo_frete"):
             df[col] = df[col].astype(str).str.strip()
 
+    # Deduplicação de frete por conhecimento (DT: Entrega):
+    # Quando múltiplas NFs compartilham o mesmo conhecimento de transporte e o
+    # sistema repete o mesmo valor de frete em todas elas, o total ficaria
+    # inflado (contando N vezes em vez de 1). A regra: se duas NFs têm o mesmo
+    # "DT: Entrega" E o mesmo valor de frete, zeramos as ocorrências extras —
+    # mantemos apenas a primeira. Linhas sem DT: Entrega preenchido são
+    # ignoradas na deduplicação para não zerá-las indevidamente.
+    _col_dt = "DT: Entrega"
+    _col_frete = C["vlr_frete"]
+    if _col_dt in df.columns and _col_frete in df.columns:
+        _tem_dt = df[_col_dt].notna() & (df[_col_dt].astype(str).str.strip() != "")
+        _dup = df.duplicated(subset=[_col_dt, _col_frete], keep="first") & _tem_dt
+        df.loc[_dup, _col_frete] = 0.0
+
     # Coluna de data (opcional) — usada para o histórico detalhado e para a
     # comparação por períodos. Aceita datas no formato brasileiro (dia/mês/ano).
     if C["data"] in df.columns:
