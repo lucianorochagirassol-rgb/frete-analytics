@@ -65,6 +65,8 @@ def remover_empresa_propria(df: pd.DataFrame) -> pd.DataFrame:
     para a própria empresa/filial, sejam clientes externos que por acaso
     também tenham "LGR" no nome. Usa o nome literal da coluna do CSV
     (C["cliente"]).
+    Também remove NFs marcadas como TRANSFERÊNCIA (_eh_transferencia=True),
+    que devem aparecer apenas na aba LGR independente do nome do cliente.
     Importante: esse filtro deve ser aplicado apenas nas abas de indicadores de
     cliente (Upload, Visão por Estado, Deficiência, Comparação) — a aba LGR
     propositalmente usa os dados SEM esse filtro, pois o objetivo dela é
@@ -72,8 +74,9 @@ def remover_empresa_propria(df: pd.DataFrame) -> pd.DataFrame:
     cliente de fato)."""
     if C["cliente"] not in df.columns:
         return df
-    mask = df[C["cliente"]].apply(_normalizar_texto).str.contains(TERMO_LGR, na=False)
-    return df[~mask].copy()
+    mask_lgr = df[C["cliente"]].apply(_normalizar_texto).str.contains(TERMO_LGR, na=False)
+    mask_transf = df.get("_eh_transferencia", pd.Series(False, index=df.index)).fillna(False)
+    return df[~mask_lgr & ~mask_transf].copy()
 
 def remover_empresa_propria_simples(df: pd.DataFrame) -> pd.DataFrame:
     """Como remover_empresa_propria, mas para DataFrames com a coluna
@@ -355,6 +358,27 @@ def carregar_dados(arquivo) -> pd.DataFrame:
         _tem_dt = df[_col_dt].notna() & (df[_col_dt].astype(str).str.strip() != "")
         _dup = df.duplicated(subset=[_col_dt, _col_frete], keep="first") & _tem_dt
         df.loc[_dup, _col_frete] = 0.0
+
+    # Filtro de emitente: manter apenas NFs emitidas pela LGR.
+    # Com a exportação em "Todas as naturezas de transporte", o CSV pode conter
+    # NFs de fornecedores (RECEBIMENTO) ou outras empresas. O app analisa
+    # exclusivamente as operações da LGR, então descartamos qualquer linha cujo
+    # emitente não contenha "LGR" no nome.
+    _col_emitente = "NF: Emitente Nome"
+    if _col_emitente in df.columns:
+        _lgr_mask = df[_col_emitente].astype(str).str.contains("LGR", na=False, case=False)
+        df = df[_lgr_mask].copy()
+
+    # Marcar NFs de transferência (entre filiais/matriz).
+    # Essas NFs devem aparecer apenas na aba LGR — são excluídas das demais
+    # abas pelo filtro em remover_empresa_propria().
+    _col_natureza = "NF: Natureza"
+    if _col_natureza in df.columns:
+        df["_eh_transferencia"] = df[_col_natureza].astype(str).str.contains(
+            "TRANSFER", na=False, case=False
+        )
+    else:
+        df["_eh_transferencia"] = False
 
     # Coluna de data (opcional) — usada para o histórico detalhado e para a
     # comparação por períodos. Aceita datas no formato brasileiro (dia/mês/ano).
@@ -722,7 +746,7 @@ with tab_upload:
             qtd_removida = qtd_antes - len(df_sem_propria)
             if qtd_removida > 0:
                 st.caption(
-                    f"ℹ️ {qtd_removida} registro(s) de clientes com \"LGR\" no nome foram "
+                    f"ℹ️ {qtd_removida} registro(s) com cliente LGR ou natureza Transferência "
                     f"identificados — não entram nas métricas de cliente abaixo nem nas abas de "
                     f"Visão por Estado/Deficiência/Comparação. Veja a separação entre filial e "
                     f"cliente de fato na aba **🏢 LGR**."
@@ -1209,12 +1233,14 @@ with tab_lgr:
                      "cidade_destino", "cidade_origem", "vlr_pedido", "peso", "vlr_frete"]
         cols_hist = [c for c in cols_hist if c in pedidos_hist_lgr.columns]
         sub_hist = pedidos_hist_lgr[cols_hist].copy()
+        sub_hist["_eh_transferencia"] = False  # dados históricos não têm flag; padrão = False
         sub_hist["fonte"] = "Histórico salvo"
         fontes_lgr.append(sub_hist)
     if df is not None:
         atual_lgr = df.rename(columns={v: k for k, v in COLS.items()})
         cols_atual = ["cliente", "transportadora", "uf_destino",
-                      "cidade_destino", "cidade_origem", "vlr_pedido", "peso", "vlr_frete"]
+                      "cidade_destino", "cidade_origem", "vlr_pedido", "peso", "vlr_frete",
+                      "_eh_transferencia"]
         cols_atual = [c for c in cols_atual if c in atual_lgr.columns]
         atual_lgr = atual_lgr[cols_atual].copy()
         atual_lgr["mes"] = mes_competencia
@@ -1228,8 +1254,15 @@ with tab_lgr:
         )
     else:
         df_base_lgr = pd.concat(fontes_lgr, ignore_index=True)
+        df_base_lgr["_eh_transferencia"] = df_base_lgr.get(
+            "_eh_transferencia", pd.Series(False, index=df_base_lgr.index)
+        ).fillna(False)
         df_base_lgr["_cliente_norm"] = df_base_lgr["cliente"].apply(_normalizar_texto)
-        df_lgr = df_base_lgr[df_base_lgr["_cliente_norm"].str.contains("LGR", na=False)].copy()
+        # Inclui NFs cujo cliente contém "LGR" OU que são TRANSFERÊNCIA
+        # (para capturar transferências com destino a clientes externos)
+        _mask_lgr_cli  = df_base_lgr["_cliente_norm"].str.contains("LGR", na=False)
+        _mask_transf   = df_base_lgr["_eh_transferencia"].astype(bool)
+        df_lgr = df_base_lgr[_mask_lgr_cli | _mask_transf].copy()
 
         if df_lgr.empty:
             st.success("✅ Nenhum registro com \"LGR\" no nome do cliente foi encontrado nos dados carregados.")
