@@ -5,7 +5,6 @@ import unicodedata
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-
 # ─── Logo da Empresa ──────────────────────────────────────────────────────────
 # Coloque um arquivo "logo.png" na raiz do repositório (mesma pasta do app.py)
 # para usar a logo da empresa no ícone da aba e na barra lateral.
@@ -132,9 +131,12 @@ def carregar_historico_mensal() -> pd.DataFrame:
     """Busca todo o histórico agregado salvo no banco. Cache de 5 minutos."""
     if not SUPABASE_DISPONIVEL:
         return pd.DataFrame()
-    client = get_supabase_client()
-    resp = client.table(TABELA_HISTORICO).select("*").order("mes").execute()
-    return pd.DataFrame(resp.data)
+    try:
+        client = get_supabase_client()
+        resp = client.table(TABELA_HISTORICO).select("*").order("mes").execute()
+        return pd.DataFrame(resp.data)
+    except Exception:
+                return pd.DataFrame()
 
 
 def salvar_pedidos_detalhados(mes: str, df: pd.DataFrame) -> tuple[int, int]:
@@ -187,28 +189,31 @@ def carregar_pedidos_historico() -> pd.DataFrame:
     filtro. Por isso buscamos em páginas de 1000 até não vir mais nada."""
     if not SUPABASE_DISPONIVEL:
         return pd.DataFrame()
-    client = get_supabase_client()
-    TAMANHO_PAGINA = 1000
-    paginas = []
-    inicio = 0
-    while True:
-        resp = (
-            client.table(TABELA_PEDIDOS)
-            .select("*")
-            .range(inicio, inicio + TAMANHO_PAGINA - 1)
-            .execute()
-        )
-        lote = resp.data
-        if not lote:
-            break
-        paginas.append(pd.DataFrame(lote))
-        if len(lote) < TAMANHO_PAGINA:
-            break
-        inicio += TAMANHO_PAGINA
-    dfh = pd.concat(paginas, ignore_index=True) if paginas else pd.DataFrame()
-    if not dfh.empty:
-        dfh["_dt"] = pd.to_datetime(dfh["data"], errors="coerce")
-    return dfh
+    try:
+        client = get_supabase_client()
+        TAMANHO_PAGINA = 1000
+        paginas = []
+        inicio = 0
+        while True:
+            resp = (
+                client.table(TABELA_PEDIDOS)
+                .select("*")
+                .range(inicio, inicio + TAMANHO_PAGINA - 1)
+                .execute()
+            )
+            lote = resp.data
+            if not lote:
+                break
+            paginas.append(pd.DataFrame(lote))
+            if len(lote) < TAMANHO_PAGINA:
+                break
+            inicio += TAMANHO_PAGINA
+        dfh = pd.concat(paginas, ignore_index=True) if paginas else pd.DataFrame()
+        if not dfh.empty:
+            dfh["_dt"] = pd.to_datetime(dfh["data"], errors="coerce")
+        return dfh
+    except Exception:
+                return pd.DataFrame()
 
 
 # Mapa para reconstruir, a partir do histórico detalhado, um DataFrame com os
