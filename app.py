@@ -364,24 +364,33 @@ def carregar_dados(arquivo) -> pd.DataFrame:
         _dup = df.duplicated(subset=[_col_dt, _col_frete], keep="first") & _tem_dt
         df.loc[_dup, _col_frete] = 0.0
 
-    # Filtro de emitente: manter apenas NFs emitidas pela LGR.
-    # Com a exportação em "Todas as naturezas de transporte", o CSV pode conter
-    # NFs de fornecedores (RECEBIMENTO) ou outras empresas. O app analisa
-    # exclusivamente as operações da LGR, então descartamos qualquer linha cujo
-    # emitente não contenha "LGR" no nome.
+    # Filtro de emitente: manter apenas NFs emitidas pela LGR ou por empresas
+    # do grupo (ex.: Metal Mecânica Cruzeiro). Com a exportação em "Todas as
+    # naturezas de transporte", o CSV pode conter NFs de fornecedores externos
+    # (RECEBIMENTO) que devem ser descartadas.
     _col_emitente = "NF: Emitente Nome"
     if _col_emitente in df.columns:
         _lgr_mask = df[_col_emitente].astype(str).str.contains("LGR", na=False, case=False)
-        df = df[_lgr_mask].copy()
+        _metal_mask = df[_col_emitente].astype(str).str.contains(
+            "METAL MECANICA CRUZEIRO", na=False, case=False
+        )
+        df = df[_lgr_mask | _metal_mask].copy()
 
-    # Marcar NFs de transferência (entre filiais/matriz).
-    # Essas NFs devem aparecer apenas na aba LGR — são excluídas das demais
-    # abas pelo filtro em remover_empresa_propria().
+    # Marcar NFs de transferência INTERNA (entre filiais/matriz da LGR).
+    # Apenas transferências cujo cliente também contém "LGR" são consideradas
+    # internas — transferências para empresas externas com natureza TRANSFERÊNCIA
+    # (distribuidores, beneficiadores, etc.) são tratadas como OUTBOUND normal
+    # e aparecem nas demais abas de análise.
     _col_natureza = "NF: Natureza"
+    _col_cliente_nf = "NF: Cliente Nome"
     if _col_natureza in df.columns:
-        df["_eh_transferencia"] = df[_col_natureza].astype(str).str.contains(
+        _natureza_transf = df[_col_natureza].astype(str).str.contains(
             "TRANSFER", na=False, case=False
         )
+        _cliente_lgr = df[_col_cliente_nf].astype(str).str.contains(
+            "LGR", na=False, case=False
+        ) if _col_cliente_nf in df.columns else pd.Series(False, index=df.index)
+        df["_eh_transferencia"] = _natureza_transf & _cliente_lgr
     else:
         df["_eh_transferencia"] = False
 
