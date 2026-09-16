@@ -212,7 +212,8 @@ def carregar_pedidos_historico() -> pd.DataFrame:
         if not dfh.empty:
             dfh["_dt"] = pd.to_datetime(dfh["data"], errors="coerce")
         return dfh
-    except Exception:
+    except Exception as _e:
+                st.sidebar.error(f"DEBUG pedidos_historico: {_e}")
                 return pd.DataFrame()
 
 
