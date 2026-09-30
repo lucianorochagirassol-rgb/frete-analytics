@@ -1,0 +1,45 @@
+name: Manter Supabase ativo
+
+# O Supabase (plano gratuito) pausa o projeto após ~7 dias sem atividade.
+# Este agendamento roda na nuvem do GitHub a cada 3 dias e faz uma consulta
+# simples no banco, mesmo com o computador desligado.
+on:
+  schedule:
+    - cron: "0 12 */3 * *"   # 12:00 UTC (09:00 de Brasília), a cada 3 dias
+  workflow_dispatch:          # permite rodar manualmente pela aba Actions
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Consultar o Supabase
+        env:
+          SUPABASE_URL: https://pitgzxgtmnvkxyummrqy.supabase.co
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          if [ -z "$SUPABASE_KEY" ]; then
+            echo "::error::Secret SUPABASE_KEY não configurado em Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          status=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
+            "$SUPABASE_URL/rest/v1/pedidos_historico?select=id&limit=1" \
+            -H "apikey: $SUPABASE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_KEY")
+          echo "HTTP $status"
+          if [ "$status" != "200" ]; then
+            cat /tmp/resp.json
+            echo "::error::Consulta ao Supabase falhou (HTTP $status). O projeto pode estar pausado."
+            exit 1
+          fi
+          echo "Supabase ativo."
+
+      - name: Evitar que o GitHub desative este agendamento
+        # O GitHub desliga agendamentos de repositórios sem commits por 60 dias.
+        # Reativar o próprio workflow a cada execução evita isso.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/manter-supabase-ativo.yml/enable"
