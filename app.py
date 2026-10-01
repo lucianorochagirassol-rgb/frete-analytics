@@ -24,6 +24,20 @@ st.set_page_config(
     layout="wide",
 )
 
+# Nos textos em markdown do Streamlit, um par de "$" vira fórmula matemática
+# (o trecho entre dois "R$" aparece em fonte de código). Escapamos o "$" em
+# todas as funções de texto, para qualquer valor em reais aparecer certo.
+def _sem_formula(funcao):
+    def envolvida(corpo, *args, **kwargs):
+        if isinstance(corpo, str):
+            corpo = corpo.replace("\\$", "$").replace("$", "\\$")
+        return funcao(corpo, *args, **kwargs)
+    return envolvida
+
+
+for _nome in ("markdown", "caption", "info", "warning", "success", "error"):
+    setattr(st, _nome, _sem_formula(getattr(st, _nome)))
+
 MESES_ABREV = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]
 ROTULO_STATUS = {
     R.STATUS_COBRADO: "Frete cobrado",
@@ -41,6 +55,8 @@ def moeda_curta(v: float) -> str:
     """Para os cartões de métrica, que cortam textos longos."""
     if abs(v) >= 1_000_000:
         return f"R$ {v / 1_000_000:.2f} mi".replace(".", ",")
+    if abs(v) >= 100_000:
+        return f"R$ {v / 1_000:.0f} mil"
     if abs(v) >= 10_000:
         return f"R$ {v / 1_000:.1f} mil".replace(".", ",")
     return moeda(v)
