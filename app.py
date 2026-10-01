@@ -37,6 +37,15 @@ def moeda(v: float) -> str:
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
+def moeda_curta(v: float) -> str:
+    """Para os cartões de métrica, que cortam textos longos."""
+    if abs(v) >= 1_000_000:
+        return f"R$ {v / 1_000_000:.2f} mi".replace(".", ",")
+    if abs(v) >= 10_000:
+        return f"R$ {v / 1_000:.1f} mil".replace(".", ",")
+    return moeda(v)
+
+
 def pct(v: float, casas: int = 2) -> str:
     return f"{v:.{casas}f}%".replace(".", ",")
 
@@ -50,23 +59,36 @@ def rotulo_mes(m: str) -> str:
     return f"{MESES_ABREV[int(mes) - 1]}/{ano}"
 
 
-COLCFG = {
-    "Vendas": st.column_config.NumberColumn(format="R$ %.2f"),
-    "Frete": st.column_config.NumberColumn(format="R$ %.2f"),
-    "Frete estimado": st.column_config.NumberColumn(format="R$ %.2f"),
-    "Peso (kg)": st.column_config.NumberColumn(format="%.0f"),
-    "% frete": st.column_config.NumberColumn(format="%.2f%%"),
-    "R$/kg": st.column_config.NumberColumn(format="R$ %.2f"),
-    "% sem frete": st.column_config.NumberColumn(format="%.0f%%"),
-    "Notas": st.column_config.NumberColumn(format="%d"),
-    "Sem frete": st.column_config.NumberColumn(format="%d"),
+# Colunas numéricas: nome exibido (com a unidade) e casas decimais. O formato
+# "localized" usa o padrão do navegador (1.234.567,89 em português) e mantém o
+# valor numérico, então ordenar pela coluna continua funcionando.
+COLUNAS_NUM = {
+    "Vendas": ("Vendas (R$)", 2),
+    "Valor das notas": ("Valor das notas (R$)", 2),
+    "Frete": ("Frete (R$)", 2),
+    "Frete estimado": ("Frete estimado (R$)", 2),
+    "Peso (kg)": ("Peso (kg)", 0),
+    "% frete": ("% frete", 2),
+    "% com estimado": ("% com estimado", 2),
+    "R$/kg": ("Frete por kg (R$)", 2),
+    "% sem frete": ("% sem frete", 0),
+    "Notas": ("Notas", 0),
+    "Sem frete": ("Sem frete", 0),
 }
 
 
 def tabela(df: pd.DataFrame, **kw):
-    """st.dataframe ocupando a largura toda em qualquer versão do Streamlit."""
+    """st.dataframe com números no padrão brasileiro, ocupando a largura toda."""
     kw.pop("key", None)  # nem toda versão aceita key em st.dataframe
-    cfg = {**COLCFG, **kw.pop("column_config", {})}
+    kw.pop("column_config", None)
+    df = df.copy()
+    cfg, nomes = {}, {}
+    for col, (nome, casas) in COLUNAS_NUM.items():
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").round(casas)
+            nomes[col] = nome
+            cfg[nome] = st.column_config.NumberColumn(format="localized")
+    df = df.rename(columns=nomes)
     try:
         st.dataframe(df, width="stretch", hide_index=True, column_config=cfg, **kw)
     except Exception:  # versões antigas não aceitam width="stretch"
@@ -322,8 +344,8 @@ with aba_geral:
         t_est = R.totais(base, True)
         t = t_est if incluir_estimado else t_real
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("💰 Vendas", moeda(t["vendas"]))
-        c2.metric("🚛 Frete", moeda(t["frete"]))
+        c1.metric("💰 Vendas", moeda_curta(t["vendas"]), help=moeda(t["vendas"]))
+        c2.metric("🚛 Frete", moeda_curta(t["frete"]), help=moeda(t["frete"]))
         c3.metric("📊 Frete / venda", pct(t["pct_frete"]))
         c4.metric("⚖️ R$ por kg", moeda(t["rs_kg"]))
         c5, c6, c7, c8 = st.columns(4)
@@ -513,12 +535,13 @@ with aba_transf:
         ti = R.totais(internas, incluir_estimado)
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Notas", inteiro(ti["notas"]))
-        c2.metric("Valor transferido", moeda(ti["vendas"]))
-        c3.metric("Frete", moeda(ti["frete"]))
+        c2.metric("Valor transferido", moeda_curta(ti["vendas"]), help=moeda(ti["vendas"]))
+        c3.metric("Frete", moeda_curta(ti["frete"]), help=moeda(ti["frete"]))
         c4.metric("Peso", f"{inteiro(ti['peso'])} kg")
 
         internas = internas.assign(fluxo=internas["estabelecimento"] + " → " + internas["destino"])
-        tabela(resumo_tabela(internas, "fluxo", "De → Para", incluir_estimado), key="tab_fluxo")
+        tabela(resumo_tabela(internas, "fluxo", "De → Para", incluir_estimado)
+              .rename(columns={"Vendas": "Valor das notas"}), key="tab_fluxo")
         mensal_t = R.resumir(internas, "mes", incluir_estimado)
         if len(mensal_t) > 1:
             mensal_t["Mês"] = mensal_t["mes"].map(rotulo_mes)
