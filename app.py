@@ -27,7 +27,7 @@ st.set_page_config(
 MESES_ABREV = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"]
 ROTULO_STATUS = {
     R.STATUS_COBRADO: "Frete cobrado",
-    R.STATUS_ESTIMADO: "Sem conhecimento (estimado)",
+    R.STATUS_ESTIMADO: "Provisionado (sem frete cobrado)",
     R.STATUS_SEM_INFO: "Sem frete e sem estimativa",
 }
 
@@ -67,6 +67,10 @@ COLUNAS_NUM = {
     "Valor das notas": ("Valor das notas (R$)", 2),
     "Frete": ("Frete (R$)", 2),
     "Frete estimado": ("Frete estimado (R$)", 2),
+    "Frete cobrado": ("Frete cobrado (R$)", 2),
+    "Frete provisionado": ("Frete provisionado (R$)", 2),
+    "Provisionados": ("Pedidos com frete provisionado", 0),
+    "% só cobrado": ("% frete só cobrado", 2),
     "Peso (kg)": ("Peso (kg)", 0),
     "% frete": ("% frete", 2),
     "% com estimado": ("% com estimado", 2),
@@ -108,23 +112,32 @@ def resumo_tabela(df: pd.DataFrame, por: str, rotulo: str, estimado: bool) -> pd
 
 
 def detalhe_notas(df: pd.DataFrame, titulo: str, chave: str):
-    with st.expander(f"🔎 Ver notas — {titulo} ({inteiro(len(df))})"):
+    with st.expander(f"🔎 Ver pedidos — {titulo} ({inteiro(len(df))})"):
         if df.empty:
-            st.caption("Nenhuma nota.")
+            st.caption("Nenhum pedido.")
             return
         t = df[[
             "data_emissao", "numero", "estabelecimento", "cliente_nome", "transportadora",
             "cidade_origem", "cidade_destino", "uf_destino", "vlr_nf", "peso",
             "frete_real", "frete_estimado", "status_frete",
         ]].copy()
+        frete = R.frete_considerado(df, incluir_estimado)
+        t["frete"] = frete
+        t["pct"] = (frete / df["vlr_nf"].where(df["vlr_nf"] > 0)) * 100
+        t["rs_kg"] = frete / df["peso"].where(df["peso"] > 0)
         t["status_frete"] = t["status_frete"].map(ROTULO_STATUS)
         t = t.rename(columns={
             "data_emissao": "Emissão", "numero": "NF", "estabelecimento": "Emitente",
             "cliente_nome": "Cliente", "transportadora": "Transportadora",
             "cidade_origem": "Origem", "cidade_destino": "Destino", "uf_destino": "UF",
-            "vlr_nf": "Vendas", "peso": "Peso (kg)", "frete_real": "Frete",
-            "frete_estimado": "Frete estimado", "status_frete": "Situação do frete",
-        }).sort_values("Emissão")
+            "vlr_nf": "Vendas", "peso": "Peso (kg)", "frete": "Frete",
+            "pct": "% frete", "rs_kg": "R$/kg", "frete_real": "Frete cobrado",
+            "frete_estimado": "Frete provisionado", "status_frete": "Origem do frete",
+        })[[
+            "Emissão", "NF", "Emitente", "Cliente", "Transportadora", "Origem", "Destino",
+            "UF", "Vendas", "Frete", "% frete", "Peso (kg)", "R$/kg", "Origem do frete",
+            "Frete cobrado", "Frete provisionado",
+        ]].sort_values("Emissão")
         tabela(t, key=f"det_{chave}")
         st.download_button(
             "⬇️ Baixar estas notas (CSV)",
@@ -182,15 +195,17 @@ with st.sidebar:
         estabs = sorted(todas["estabelecimento"].dropna().unique().tolist())
         estab_sel = st.multiselect("🏭 Emitente", estabs, default=estabs)
         incluir_estimado = st.toggle(
-            "Incluir frete estimado",
-            value=False,
-            help="Entregas sem conhecimento de transporte lançado (principalmente as entregas "
-                 "locais da filial de SP) entram com o valor do aprovisionamento do sistema.",
+            "Usar frete provisionado quando faltar o cobrado",
+            value=True,
+            help="Pedidos sem frete cobrado (sem conhecimento de transporte lançado, "
+                 "principalmente as entregas locais da filial de SP) entram com o frete "
+                 "provisionado pelo sistema, em vez de R$ 0,00. Desligue para ver só o "
+                 "frete cobrado.",
         )
     else:
         ini = fim = None
         estab_sel = []
-        incluir_estimado = False
+        incluir_estimado = True
         if not erro_carga:
             st.info("Nenhum mês salvo ainda. Envie um CSV na aba **📤 Enviar arquivo**.")
 
@@ -209,7 +224,8 @@ st.markdown("## 🚚 Análise de Logística & Eficiência de Fretes")
 if meses:
     st.caption(
         f"{rotulo_mes(ini)} a {rotulo_mes(fim)} · notas CIF para clientes"
-        + (" · inclui frete estimado" if incluir_estimado else " · só frete cobrado")
+        + (" · frete cobrado + provisionado onde faltou" if incluir_estimado
+           else " · só frete cobrado")
     )
 
 aba_env, aba_geral, aba_uf, aba_comp, aba_transf = st.tabs([
@@ -272,30 +288,41 @@ with aba_env:
             )
 
             base_arq = R.base_clientes(notas_arq)
-            status = rel["status_frete"]
-            sem = status.get(R.STATUS_ESTIMADO, 0) + status.get(R.STATUS_SEM_INFO, 0)
-            if sem:
-                st.markdown("#### 2. Notas sem frete cobrado")
-                st.info(
-                    f"{inteiro(sem)} de {inteiro(rel['base_notas'])} notas CIF para clientes "
-                    f"({pct(sem / max(rel['base_notas'], 1) * 100, 0)}) não têm conhecimento de "
-                    "transporte lançado. Quando a transportadora aparece com 100% abaixo, o "
-                    "custo dela não é lançado nota a nota no sistema (não é atraso de romaneio). "
-                    "Essas notas entram com o valor do aprovisionamento quando a opção "
-                    "**Incluir frete estimado** está ligada."
+            prov = base_arq[base_arq["status_frete"].eq(R.STATUS_ESTIMADO)]
+            sem_nada = base_arq[base_arq["status_frete"].eq(R.STATUS_SEM_INFO)]
+            if len(prov) or len(sem_nada):
+                st.markdown("#### 2. Pedidos sem frete cobrado")
+                aviso = (
+                    f"⚠️ **{inteiro(len(prov))} pedidos** "
+                    f"({pct(len(prov) / max(len(base_arq), 1) * 100, 0)} dos pedidos CIF para "
+                    "clientes) estavam sem frete cobrado e **passaram a usar o frete "
+                    f"provisionado**, somando {moeda(prov['frete_estimado'].sum())}."
+                )
+                if len(sem_nada):
+                    aviso += (
+                        f" Outros {inteiro(len(sem_nada))} pedidos não têm nem frete cobrado "
+                        "nem provisionado e ficam com R$ 0,00."
+                    )
+                st.warning(aviso)
+                st.caption(
+                    "Transportadora com 100% abaixo = o custo dela não é lançado nota a nota "
+                    "no sistema (não é atraso de romaneio)."
                 )
                 sf = R.sem_frete_por_transportadora(base_arq).rename(columns={
                     "estabelecimento": "Emitente", "transportadora": "Transportadora",
-                    "notas": "Notas", "sem_frete": "Sem frete", "vendas": "Vendas",
-                    "estimado": "Frete estimado", "pct_sem_frete": "% sem frete",
+                    "notas": "Notas", "sem_frete": "Provisionados", "vendas": "Vendas",
+                    "estimado": "Frete provisionado", "pct_sem_frete": "% sem frete",
                 })
                 tabela(sf, key="sem_frete_arq")
 
             st.markdown("#### 3. Resumo por mês")
-            por_mes = R.resumir(base_arq, "mes", False)
-            est_mes = R.resumir(base_arq, "mes", True)[["mes", "frete", "pct_frete"]]
-            est_mes.columns = ["mes", "frete_total", "pct_total"]
-            por_mes = por_mes.merge(est_mes, on="mes")
+            por_mes = R.resumir(base_arq, "mes", True)
+            so_cob = R.resumir(base_arq, "mes", False)[["mes", "pct_frete"]]
+            so_cob.columns = ["mes", "pct_cobrado"]
+            n_prov = (base_arq[base_arq["status_frete"].eq(R.STATUS_ESTIMADO)]
+                      .groupby("mes").size().rename("prov").reset_index())
+            por_mes = por_mes.merge(so_cob, on="mes").merge(n_prov, on="mes", how="left")
+            por_mes["prov"] = por_mes["prov"].fillna(0)
             ja_salvos = set(meses)
             por_mes["Situação"] = por_mes["mes"].map(
                 lambda m: "já salvo, será substituído" if m in ja_salvos else "novo"
@@ -304,9 +331,10 @@ with aba_env:
             tabela(
                 por_mes.rename(columns={
                     "notas": "Notas", "vendas": "Vendas", "frete": "Frete",
-                    "pct_frete": "% frete", "pct_total": "% com estimado",
-                })[["Mês", "Notas", "Vendas", "Frete", "% frete", "% com estimado", "Situação"]],
-                column_config={"% com estimado": st.column_config.NumberColumn(format="%.2f%%")},
+                    "pct_frete": "% frete", "pct_cobrado": "% só cobrado",
+                    "prov": "Provisionados",
+                })[["Mês", "Notas", "Vendas", "Frete", "% frete", "% só cobrado",
+                    "Provisionados", "Situação"]],
                 key="resumo_arq",
             )
 
@@ -343,16 +371,41 @@ with aba_geral:
         t_real = R.totais(base, False)
         t_est = R.totais(base, True)
         t = t_est if incluir_estimado else t_real
+        prov = base[base["status_frete"].eq(R.STATUS_ESTIMADO)]
+        sem_nada = base[base["status_frete"].eq(R.STATUS_SEM_INFO)]
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("💰 Vendas", moeda_curta(t["vendas"]), help=moeda(t["vendas"]))
-        c2.metric("🚛 Frete", moeda_curta(t["frete"]), help=moeda(t["frete"]))
-        c3.metric("📊 Frete / venda", pct(t["pct_frete"]))
-        c4.metric("⚖️ R$ por kg", moeda(t["rs_kg"]))
+        c1.metric("📊 Frete sobre vendas", pct(t["pct_frete"]),
+                  help="Frete dividido pelo valor das notas, em %.")
+        c2.metric("💰 Vendas", moeda_curta(t["vendas"]), help=moeda(t["vendas"]))
+        c3.metric("🚛 Frete", moeda_curta(t["frete"]), help=moeda(t["frete"]))
+        c4.metric("⚖️ Frete por kg", moeda(t["rs_kg"]))
         c5, c6, c7, c8 = st.columns(4)
-        c5.metric("Frete / venda só com frete cobrado", pct(t_real["pct_frete"]))
-        c6.metric("Frete / venda com estimado", pct(t_est["pct_frete"]))
-        c7.metric("Notas sem frete cobrado", pct(t["pct_sem_frete"], 0))
-        c8.metric("Notas", inteiro(t["notas"]))
+        if incluir_estimado:
+            c5.metric("% frete só com o cobrado", pct(t_real["pct_frete"]))
+        else:
+            c5.metric("% frete com o provisionado", pct(t_est["pct_frete"]))
+        c6.metric("Pedidos com frete provisionado", inteiro(len(prov)))
+        c7.metric("Frete provisionado", moeda_curta(prov["frete_estimado"].sum()),
+                  help=moeda(prov["frete_estimado"].sum()))
+        c8.metric("Pedidos", inteiro(t["notas"]))
+
+        if len(prov):
+            if incluir_estimado:
+                st.warning(
+                    f"⚠️ **{inteiro(len(prov))} pedidos** "
+                    f"({pct(len(prov) / len(base) * 100, 0)} do período) estavam sem frete "
+                    f"cobrado e **estão usando o frete provisionado** "
+                    f"({moeda(prov['frete_estimado'].sum())})."
+                    + (f" Outros {inteiro(len(sem_nada))} não têm nem frete cobrado nem "
+                       "provisionado e ficam com R$ 0,00." if len(sem_nada) else "")
+                )
+            else:
+                st.warning(
+                    f"⚠️ **{inteiro(len(prov))} pedidos** "
+                    f"({pct(len(prov) / len(base) * 100, 0)} do período) estão sem frete "
+                    "cobrado e **contam como R$ 0,00**. Ligue \"Usar frete provisionado\" na "
+                    "barra lateral para usar o valor provisionado."
+                )
 
         fob = no_periodo[~no_periodo["eh_interna"] & ~no_periodo["eh_cif"]]
         if not fob.empty:
@@ -362,7 +415,7 @@ with aba_geral:
             )
 
         mensal_r = R.resumir(base, "mes", False)[["mes", "pct_frete"]].assign(serie="Só frete cobrado")
-        mensal_e = R.resumir(base, "mes", True)[["mes", "pct_frete"]].assign(serie="Com frete estimado")
+        mensal_e = R.resumir(base, "mes", True)[["mes", "pct_frete"]].assign(serie="Com frete provisionado")
         mensal = pd.concat([mensal_r, mensal_e]).sort_values("mes")
         mensal["Mês"] = mensal["mes"].map(rotulo_mes)
         if mensal["mes"].nunique() > 1:
