@@ -26,7 +26,7 @@ jobs:
             exit 1
           fi
           status=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
-            "$SUPABASE_URL/rest/v1/pedidos_historico?select=id&limit=1" \
+            "$SUPABASE_URL/rest/v1/notas?select=chave&limit=1" \
             -H "apikey: $SUPABASE_KEY" \
             -H "Authorization: Bearer $SUPABASE_KEY")
           echo "HTTP $status"
